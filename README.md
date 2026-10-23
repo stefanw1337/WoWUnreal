@@ -21,6 +21,7 @@ This repository is **Stefan's (stefanw1337) continued development** of [Clancey/
 - [Contributing](#contributing)
 - [Fair play](#fair-play)
 - [A request to AzerothCore and TrinityCore developers](#a-request-to-azerothcore-and-trinitycore-developers)
+- [AI-assisted development](#ai-assisted-development)
 - [Credits](#credits)
 - [Legal](#legal)
 - [Licence](#licence)
@@ -503,6 +504,10 @@ We would love to see WoWUnreal accepted by default, alongside the original clien
 - built-in support for the open handshake in `Server/mod-wowunreal`, which lets a realm recognise WoWUnreal releases (`WowUnreal.RequireClient`, `WowUnreal.ReleaseSecrets`) and tell the client which features it allows.
 
 We know that a client which announces itself can be imitated, so we are not asking anyone to switch protection off. We are asking for a supported way to let players choose this client. We're happy to help with pull requests; please open an issue to talk about it.
+
+## AI-assisted development
+
+Most of this fork's code was written with AI coding assistants (Anthropic's Claude), directed, tested in game and reviewed by Stefan. Comments in the code that mention "Claude-UI" or "Claude-Perf" refer to those AI sessions, and the round numbers (r123 and so on) are their change log. The splash screen and icon are AI-generated artwork. As with any alpha, review the code before you rely on it.
 
 ## Credits
 
