@@ -350,7 +350,7 @@ The biggest known issue is everything we don't know yet. Not every class, race a
 - Warden: WoWUnreal can't answer Warden like the original client (see the request to server developers below)
 - Hundreds of smaller fixes were made but never confirmed in game. They're tracked in our own test log, too many to list here
 - The calendar still has open problems
-- Waterfall mist: where the Northshire waterfall runs out into the pond, the mist still hangs a little above the water
+- In Northshire, by the waterfall, the mist where the water runs out into the pond still hangs a little above the water
 - TormentWoW: ElvUI still raises some Lua errors
 - With real weather on, a fully overcast day can look almost black
 - Weather particles can show under roofs at some camera angles, and snow outside isn't visible from indoors
