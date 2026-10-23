@@ -10,6 +10,11 @@ FDbcStore& FDbcStore::Get()
     return Instance;
 }
 
+void FDbcStore::ResetForReload()
+{
+    *this = FDbcStore();
+}
+
 static bool TryLoadSingleDbc(FMpqManager& Mpq, const TCHAR* DbcPath, FDbcParser& OutParser)
 {
     TArray<uint8> Data;
@@ -67,6 +72,7 @@ bool FDbcStore::LoadAll(FMpqManager& Mpq)
     // Load Tier 1 (Essential) DBC tables for initial world display
     FDbcParser Parser;
     int32 Loaded = 0;
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\FactionTemplate.dbc"), Parser)) Factions.Load(Parser);
 
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\Map.dbc"), Parser))
     {
@@ -91,6 +97,18 @@ bool FDbcStore::LoadAll(FMpqManager& Mpq)
             const FAreaTableDbcEntry& E = AreaTableDbc.GetAll()[i];
             UE_LOG(LogDbcStore, Verbose, TEXT("Area[%d]: ID=%d MapID=%d Name='%s'"), i, E.ID, E.MapID, *E.Name);
         }
+    }
+
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\QuestSort.dbc"), Parser))
+    {
+        QuestSortDbc.Load(Parser);
+        ++Loaded;
+    }
+
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\LFGDungeons.dbc"), Parser))
+    {
+        LfgDungeonsDbc.Load(Parser);
+        ++Loaded;
     }
 
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\Light.dbc"), Parser))
@@ -210,6 +228,12 @@ bool FDbcStore::LoadAll(FMpqManager& Mpq)
         }
     }
 
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\CreatureDisplayInfoExtra.dbc"), Parser))
+    {
+        CreatureDisplayInfoExtraDbc.Load(Parser);
+        ++Loaded;
+    }
+
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\CreatureModelData.dbc"), Parser))
     {
         CreatureModelDataDbc.Load(Parser);
@@ -223,8 +247,40 @@ bool FDbcStore::LoadAll(FMpqManager& Mpq)
         }
     }
 
+	// GameObject visuals are resolved client-side from the display ID carried by
+	// UPDATE_OBJECT. This is essential world data (doors, mailboxes, fires,
+	// transports), not deferred UI data.
+	if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\GameObjectDisplayInfo.dbc"), Parser))
+	{
+		GameObjectDisplayInfoDbc.Load(Parser);
+		++Loaded;
+
+		for (int32 Index = 0; Index < FMath::Min(3, GameObjectDisplayInfoDbc.Num()); ++Index)
+		{
+			const FGameObjectDisplayInfoDbcEntry& Entry = GameObjectDisplayInfoDbc.GetAll()[Index];
+			UE_LOG(LogDbcStore, Verbose,
+				TEXT("GameObjectDisplayInfo[%d]: ID=%u Model='%s' Bounds=%s..%s"),
+				Index, Entry.ID, *Entry.ModelPath,
+				*Entry.BoundsMin.ToCompactString(), *Entry.BoundsMax.ToCompactString());
+		}
+	}
+
+    // Ground effects are required while initial ADT tiles are built, so these
+    // tables must be ready before asynchronous terrain loading begins.
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\GroundEffectTexture.dbc"), Parser))
+    {
+        GroundEffectTextureDbc.Load(Parser);
+        ++Loaded;
+    }
+
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\GroundEffectDoodad.dbc"), Parser))
+    {
+        GroundEffectDoodadDbc.Load(Parser);
+        ++Loaded;
+    }
+
     bLoaded = Loaded > 0;
-    UE_LOG(LogDbcStore, Log, TEXT("DbcStore: loaded %d/12 essential DBC tables (Tier 1)"), Loaded);
+    UE_LOG(LogDbcStore, Log, TEXT("DbcStore: loaded %d/18 essential DBC tables (Tier 1)"), Loaded);
     return bLoaded;
 }
 
@@ -233,6 +289,12 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
     // Load Tier 2 (Deferred) DBC tables that can wait
     FDbcParser Parser;
     int32 Loaded = 0;
+
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\Item.dbc"), Parser))
+    {
+        ItemDbc.Load(Parser);
+        ++Loaded;
+    }
 
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\ItemDisplayInfo.dbc"), Parser))
     {
@@ -247,6 +309,99 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
         }
     }
 
+    EnchantmentNames.Reset();
+    EnchantmentEffectTable.Reset();
+    if (LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SpellItemEnchantment.dbc"),Parser) && Parser.GetFieldCount() >= 38)
+        for (uint32 Row=0; Row<Parser.GetRecordCount(); ++Row)
+        {
+            FString Name = Parser.GetLocalizedString(Row,14);
+            for (uint32 Locale=14; Locale<30 && Name.IsEmpty(); ++Locale) Name=Parser.GetString(Row,Locale);
+            EnchantmentNames.Add(Parser.GetUInt(Row,0),Name);
+            // 3.3.5 layout: ID, Charges, Effect[3] (2-4), EffectPointsMin[3] (5-7), EffectPointsMax[3], EffectArg[3] (11-13).
+            FEnchantmentEffects& Effects = EnchantmentEffectTable.Add(Parser.GetUInt(Row,0));
+            for (uint32 I=0; I<3; ++I)
+            {
+                Effects.Type[I] = Parser.GetUInt(Row,2+I);
+                Effects.Amount[I] = static_cast<int32>(Parser.GetUInt(Row,5+I));
+                Effects.Arg[I] = Parser.GetUInt(Row,11+I);
+            }
+        }
+    // Random "of the Bear" stats on item instances (ITEM_FIELD_RANDOM_PROPERTIES_ID).
+    RandomPropertyTable.Reset();
+    RandomSuffixTable.Reset();
+    // ItemRandomProperties.dbc: ID, InternalName, Enchantment[5] (2-6), Name[17] (7-23).
+    if (TryLoadSingleDbc(Mpq,TEXT("DBFilesClient\\ItemRandomProperties.dbc"),Parser) && Parser.GetFieldCount() >= 8)
+        for (uint32 Row=0; Row<Parser.GetRecordCount(); ++Row)
+        {
+            FItemRandomEnchants& Entry = RandomPropertyTable.Add(Parser.GetUInt(Row,0));
+            for (uint32 I=0; I<5; ++I) Entry.Enchant[I] = Parser.GetUInt(Row,2+I);
+            Entry.Name = Parser.GetLocalizedString(Row,7);
+        }
+    // ItemRandomSuffix.dbc: ID, Name[17] (1-17), InternalName (18), Enchantment[5] (19-23), AllocationPct[5] (24-28).
+    if (TryLoadSingleDbc(Mpq,TEXT("DBFilesClient\\ItemRandomSuffix.dbc"),Parser) && Parser.GetFieldCount() >= 29)
+        for (uint32 Row=0; Row<Parser.GetRecordCount(); ++Row)
+        {
+            FItemRandomEnchants& Entry = RandomSuffixTable.Add(Parser.GetUInt(Row,0));
+            Entry.Name = Parser.GetLocalizedString(Row,1);
+            for (uint32 I=0; I<5; ++I) { Entry.Enchant[I] = Parser.GetUInt(Row,19+I); Entry.AllocationPct[I] = Parser.GetUInt(Row,24+I); }
+        }
+    // ScalingStatDistribution.dbc: ID, StatID[10] (1-10, -1 = none), Bonus[10] (11-20), MaxLevel (21).
+    ScalingDistributionTable.Reset();
+    if (TryLoadSingleDbc(Mpq,TEXT("DBFilesClient\\ScalingStatDistribution.dbc"),Parser) && Parser.GetFieldCount() >= 22)
+        for (uint32 Row=0; Row<Parser.GetRecordCount(); ++Row)
+        {
+            FScalingStatDistribution& Entry = ScalingDistributionTable.Add(Parser.GetUInt(Row,0));
+            for (uint32 I=0; I<10; ++I) { Entry.StatId[I] = static_cast<int32>(Parser.GetUInt(Row,1+I)); Entry.Bonus[I] = Parser.GetUInt(Row,11+I); }
+            Entry.MaxLevel = Parser.GetUInt(Row,21);
+        }
+    // ScalingStatValues.dbc: ID, Charlevel, ShoulderBudget/TrinketBudget/WeaponBudget1H/RangedBudget (2-5),
+    // ClothShoulder/LeatherShoulder/MailShoulder/PlateShoulder armor (6-9), DPS 1H/2H/caster 1H/2H/ranged/wand (10-15),
+    // SpellPower (16), PrimaryBudget (17), TertiaryBudget (18), cloth/leather/mail/plate cloak... armor (19-23).
+    ScalingValuesByLevel.Reset();
+    if (TryLoadSingleDbc(Mpq,TEXT("DBFilesClient\\ScalingStatValues.dbc"),Parser) && Parser.GetFieldCount() >= 24)
+        for (uint32 Row=0; Row<Parser.GetRecordCount(); ++Row)
+        {
+            FScalingStatValues& Entry = ScalingValuesByLevel.Add(Parser.GetUInt(Row,1));
+            for (uint32 I=0; I<4; ++I) { Entry.SsdMultiplier[I] = Parser.GetUInt(Row,2+I); Entry.ArmorMod[I] = Parser.GetUInt(Row,6+I); }
+            for (uint32 I=0; I<6; ++I) Entry.DpsMod[I] = Parser.GetUInt(Row,10+I);
+            Entry.SpellPower = Parser.GetUInt(Row,16);
+            Entry.SsdMultiplier2 = Parser.GetUInt(Row,17);
+            Entry.SsdMultiplier3 = Parser.GetUInt(Row,18);
+            for (uint32 I=0; I<5; ++I) Entry.ArmorMod2[I] = Parser.GetUInt(Row,19+I);
+        }
+    // Achievement.dbc (3.3.5): ID, Faction (-1 both, 0 Horde, 1 Alliance), Map, Parent, Name[17] (4-20),
+    // Description[17] (21-37), Category (38), Points (39), OrderInCategory (40), Flags (41), Icon (42), Reward[17] (43-59).
+    AchievementTable.Reset();
+    if (TryLoadSingleDbc(Mpq,TEXT("DBFilesClient\\Achievement.dbc"),Parser) && Parser.GetFieldCount() >= 60)
+        for (uint32 Row=0; Row<Parser.GetRecordCount(); ++Row)
+        {
+            FAchievement& Entry = AchievementTable.Add(Parser.GetUInt(Row,0));
+            Entry.Id = Parser.GetUInt(Row,0);
+            Entry.Faction = static_cast<int32>(Parser.GetUInt(Row,1));
+            Entry.Name = Parser.GetLocalizedString(Row,4);
+            Entry.Description = Parser.GetLocalizedString(Row,21);
+            Entry.Category = Parser.GetUInt(Row,38);
+            Entry.Points = Parser.GetUInt(Row,39);
+            Entry.Order = Parser.GetUInt(Row,40);
+            Entry.Flags = Parser.GetUInt(Row,41);
+            Entry.Icon = Parser.GetUInt(Row,42);
+            Entry.Reward = Parser.GetLocalizedString(Row,43);
+        }
+    // Achievement_Category.dbc: ID, Parent (-1 = top level), Name[17] (2-18), SortOrder (19).
+    AchievementCategoryTable.Reset();
+    if (TryLoadSingleDbc(Mpq,TEXT("DBFilesClient\\Achievement_Category.dbc"),Parser) && Parser.GetFieldCount() >= 20)
+        for (uint32 Row=0; Row<Parser.GetRecordCount(); ++Row)
+        {
+            FAchievementCategory& Entry = AchievementCategoryTable.Add(Parser.GetUInt(Row,0));
+            Entry.Id = Parser.GetUInt(Row,0);
+            Entry.Parent = static_cast<int32>(Parser.GetUInt(Row,1));
+            Entry.Name = Parser.GetLocalizedString(Row,2);
+            Entry.Order = Parser.GetUInt(Row,19);
+        }
+    UE_LOG(LogDbcStore, Log, TEXT("Achievements: %d in %d categories"), AchievementTable.Num(), AchievementCategoryTable.Num());
+    UE_LOG(LogDbcStore, Log, TEXT("Item enchantments: %d, random properties: %d, random suffixes: %d, scaling distributions: %d, scaling levels: %d"),
+        EnchantmentEffectTable.Num(), RandomPropertyTable.Num(), RandomSuffixTable.Num(), ScalingDistributionTable.Num(), ScalingValuesByLevel.Num());
+
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\Spell.dbc"), Parser))
     {
         SpellDbc.Load(Parser);
@@ -259,6 +414,15 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
                 i, E.ID, *E.SpellName, E.SchoolMask, E.SpellLevel);
         }
     }
+    if (LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SpellShapeshiftForm.dbc"),Parser)) SpellDbc.LoadForms(Parser);
+    if (LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SkillLine.dbc"),Parser)) SkillLineDbc.LoadLines(Parser);
+    if (LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SkillLineAbility.dbc"),Parser)) SkillLineDbc.LoadAbilities(Parser);
+    if(LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SpellDuration.dbc"),Parser)) SpellDbc.LoadTiming(Parser,0);
+    if(LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SpellCastTimes.dbc"),Parser)) SpellDbc.LoadTiming(Parser,1);
+    if(LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SpellRange.dbc"),Parser)) SpellDbc.LoadTiming(Parser,2);
+    if(LoadSingleDbc(Mpq,TEXT("DBFilesClient\\SpellRadius.dbc"),Parser)) SpellDbc.LoadTiming(Parser,3);
+    if(LoadSingleDbc(Mpq,TEXT("DBFilesClient\\Lock.dbc"),Parser)) SpellDbc.LoadLocks(Parser);
+
 
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\SpellIcon.dbc"), Parser))
     {
@@ -328,14 +492,8 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
         }
     }
 
-    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\GroundEffectTexture.dbc"), Parser))
-    {
-        GroundEffectTextureDbc.Load(Parser);
-        ++Loaded;
-
-        UE_LOG(LogDbcStore, Verbose, TEXT("GroundEffectTexture: %d records"), GroundEffectTextureDbc.Num());
-    }
-
+    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\Emotes.dbc"), Parser))
+        EmotesDbc.Load(Parser);
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\EmotesText.dbc"), Parser))
     {
         EmotesTextDbc.Load(Parser);
@@ -387,7 +545,10 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
         ++Loaded;
     }
 
-    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\CharComponentTextureLayouts.dbc"), Parser))
+    // r736 (Claude-UI flagged these on TormentWoW 23.10; they are in every log, Thera too): CharComponentTextureLayouts.dbc
+    // and CharComponentTextureSections.dbc only exist from Cataclysm on. 3.3.5 data never has them, and WowCharacterTexture
+    // then uses its built-in 512x512 layout and regions, so their absence is a note, not a warning.
+    if (TryLoadSingleDbc(Mpq, TEXT("DBFilesClient\\CharComponentTextureLayouts.dbc"), Parser))
     {
         CharComponentTextureLayoutsDbc.Load(Parser);
         ++Loaded;
@@ -400,7 +561,7 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
         }
     }
 
-    if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\CharComponentTextureSections.dbc"), Parser))
+    if (TryLoadSingleDbc(Mpq, TEXT("DBFilesClient\\CharComponentTextureSections.dbc"), Parser))
     {
         CharComponentTextureSectionsDbc.Load(Parser);
         ++Loaded;
@@ -411,6 +572,11 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
             UE_LOG(LogDbcStore, Verbose, TEXT("CharComponentTextureSections[%d]: ID=%d LayoutID=%d Type=%d Rect=(%d,%d,%dx%d)"),
                 i, E.ID, E.CharComponentTextureLayoutID, E.SectionType, E.X, E.Y, E.Width, E.Height);
         }
+    }
+
+    if (CharComponentTextureLayoutsDbc.Num() == 0 || CharComponentTextureSectionsDbc.Num() == 0)
+    {
+        UE_LOG(LogDbcStore, Log, TEXT("CharComponentTextureLayouts/Sections.dbc not in this data (Cataclysm and later only): character textures use the built-in 3.3.5 layout"));
     }
 
     if (LoadSingleDbc(Mpq, TEXT("DBFilesClient\\CharHairGeosets.dbc"), Parser))
@@ -471,5 +637,5 @@ void FDbcStore::LoadDeferred(FMpqManager& Mpq)
     }
 
     bDeferredLoaded = true;
-    UE_LOG(LogDbcStore, Log, TEXT("DbcStore: loaded %d/19 deferred DBC tables (Tier 2)"), Loaded);
+    UE_LOG(LogDbcStore, Log, TEXT("DbcStore: loaded %d/20 deferred DBC tables (Tier 2)"), Loaded);
 }

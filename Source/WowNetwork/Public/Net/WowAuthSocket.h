@@ -1,6 +1,7 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "HAL/Runnable.h"
+#include "HAL/ThreadSafeBool.h"
 
 class FSocket;
 struct FWowRealmInfo;
@@ -49,6 +50,7 @@ private:
     FString Password;
     TArray<uint8> SessionKey;
 
+    TSharedRef<FThreadSafeBool, ESPMode::ThreadSafe> CallbackActive = MakeShared<FThreadSafeBool, ESPMode::ThreadSafe>(true);
     bool bRunning = false;
     bool bAuthComplete = false;
     bool bRealmListRequested = false;

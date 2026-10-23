@@ -27,6 +27,23 @@ static int L_print(lua_State* L)
             Out += FString::Printf(TEXT("%s: %p"), UTF8_TO_TCHAR(luaL_typename(L, i)), lua_topointer(L, i));
     }
     UE_LOG(LogWowLuaApi, Log, TEXT("[Lua] %s"), *Out);
+    // The 3.3.5 client prints to the default chat frame (AIO, ElvUI and most addons
+    // report errors and status this way).
+    lua_getglobal(L, "DEFAULT_CHAT_FRAME");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "AddMessage");
+        if (lua_isfunction(L, -1))
+        {
+            lua_insert(L, -2);
+            FTCHARToUTF8 Text(*Out);
+            lua_pushlstring(L, Text.Get(), Text.Length());
+            if (lua_pcall(L, 2, 0, 0) != 0) lua_pop(L, 1);
+            return 0;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
     return 0;
 }
 
@@ -405,18 +422,34 @@ static int L_debugprofilestop(lua_State* L)
 
 // ─── Error handling ─────────────────────────────────────────────────────────────
 
+// r362 (Stefan 15.10: Bartender4 made no bars and nothing in the log said why): the handler
+// geterrorhandler() returns always writes the error to the log first (the first 300 a session),
+// then calls the handler the UI installed (FrameXML's _ERRORMESSAGE shows it only with the "Show
+// Lua errors" option, so AceAddon's safecall failures were invisible).
+static int L_WowLoggingErrorHandler(lua_State* L)
+{
+    static int32 GLoggedErrors = 0;
+    if (GLoggedErrors < 300)
+    {
+        ++GLoggedErrors;
+        const char* Msg = lua_tostring(L, 1);
+        UE_LOG(LogWowLuaApi, Error, TEXT("[Lua Error] %s"), Msg ? UTF8_TO_TCHAR(Msg) : TEXT("(nil)"));
+    }
+    static int32 GDepth = 0; // a UI handler that ends in this one again stops here
+    lua_getglobal(L, "_ERRORHANDLER");
+    if (GDepth == 0 && lua_isfunction(L, -1) && lua_tocfunction(L, -1) != L_WowLoggingErrorHandler)
+    {
+        lua_insert(L, 1);
+        ++GDepth;
+        lua_pcall(L, lua_gettop(L) - 1, 0, 0);
+        --GDepth;
+    }
+    return 0;
+}
+
 static int L_geterrorhandler(lua_State* L)
 {
-    lua_getglobal(L, "_ERRORHANDLER");
-    if (lua_isnil(L, -1))
-    {
-        lua_pop(L, 1);
-        lua_pushcfunction(L, [](lua_State* L2) -> int {
-            const char* msg = lua_tostring(L2, 1);
-            UE_LOG(LogWowLuaApi, Error, TEXT("[Lua Error] %s"), msg ? UTF8_TO_TCHAR(msg) : TEXT("(nil)"));
-            return 0;
-        });
-    }
+    lua_pushcfunction(L, L_WowLoggingErrorHandler);
     return 1;
 }
 
@@ -472,6 +505,23 @@ static int L_issecurevariable(lua_State* L)
 static int L_forceinsecure(lua_State* L)
 {
     return 0;
+}
+
+// scrub(...) — returns its arguments with anything but nil/boolean/number/string replaced by
+// nil. RestrictedExecution.lua captures it at load; without it no secure snippet can run.
+static int L_scrub(lua_State* L)
+{
+    const int N = lua_gettop(L);
+    for (int I = 1; I <= N; ++I)
+    {
+        const int T = lua_type(L, I);
+        if (T != LUA_TNIL && T != LUA_TBOOLEAN && T != LUA_TNUMBER && T != LUA_TSTRING)
+        {
+            lua_pushnil(L);
+            lua_replace(L, I);
+        }
+    }
+    return N;
 }
 
 // tostringall — convert all arguments to strings and return them
@@ -584,7 +634,8 @@ static int L_bit_bxor(lua_State* L)
 static int L_bit_bnot(lua_State* L)
 {
     uint32 A = static_cast<uint32>(static_cast<int64>(lua_tonumber(L, 1)));
-    lua_pushnumber(L, static_cast<double>(~A));
+	const int32 Result = ~static_cast<int32>(A);
+	lua_pushnumber(L, static_cast<lua_Number>(Result));
     return 1;
 }
 static int L_bit_lshift(lua_State* L)
@@ -696,6 +747,10 @@ void WowLuaApi::RegisterGlobals(lua_State* L)
     lua_register(L, "hooksecurefunc", L_hooksecurefunc);
     lua_register(L, "issecurevariable", L_issecurevariable);
     lua_register(L, "forceinsecure", L_forceinsecure);
+    lua_register(L, "scrub", L_scrub);
+    // No in-game cinematics are played; StaticPopup_Show refuses every dialog when this
+    // global is missing (AUTOEQUIP_BIND left the equip pending forever).
+    lua_register(L, "InCinematic", [](lua_State* L2) -> int { lua_pushboolean(L2, 0); return 1; });
     lua_register(L, "tostringall", L_tostringall);
 
     // Math aliases
@@ -787,7 +842,7 @@ void WowLuaApi::RegisterGlobals(lua_State* L)
         TOOLTIP_DEFAULT_COLOR = {r=1, g=1, b=1}
         TOOLTIP_DEFAULT_BACKGROUND_COLOR = {r=0, g=0, b=0}
         ATTACHMENTS_MAX_SEND = 12
-        MAX_PLAYER_LEVEL_TABLE = { 80 }
+        MAX_PLAYER_LEVEL_TABLE = { [0] = 60, [1] = 70, [2] = 80 } -- indexed by GetAccountExpansionLevel()
 
         -- UI Dropdown menu globals
         UIDROPDOWNMENU_OPEN_MENU = nil
@@ -813,6 +868,7 @@ void WowLuaApi::RegisterGlobals(lua_State* L)
             return c.r, c.g, c.b, c.hex
         end
         function GetExpansionLevel() return 2 end -- WotLK
+        function GetAccountExpansionLevel() return GetExpansionLevel() end -- ElvUI DataBars
         function BNGetMaxPlayersInConversation() return 10 end
         function BNGetInfo() return 0, "", "", "", 0, false end
         function BNGetNumFriends() return 0, 0 end
@@ -1057,6 +1113,15 @@ void WowLuaApi::RegisterGlobals(lua_State* L)
 
         -- string.join (WoW FrameXML expects this)
         string.join = strjoin
+	)LUA";
+
+if (luaL_dostring(L, BootstrapLua) != 0)
+{
+    UE_LOG(LogWowLuaApi, Error, TEXT("Bootstrap Lua part 1 error: %hs"), lua_tostring(L, -1));
+    lua_pop(L, 1);
+}
+
+const char* BootstrapLuaPart2 = R"LUA(
 
         -- Additional constants needed by FrameXML
         NONE = "NONE"
@@ -1081,6 +1146,33 @@ void WowLuaApi::RegisterGlobals(lua_State* L)
         -- Chat type info table used by chat frame system
         for _, v in ipairs({"SAY","YELL","EMOTE","WHISPER","PARTY","RAID","GUILD","OFFICER","CHANNEL","SYSTEM","LOOT","MONEY","COMBAT_XP_GAIN","COMBAT_HONOR_GAIN"}) do
             ChatTypeInfo[v] = ChatTypeInfo[v] or {r=1, g=1, b=1, sticky=0}
+        end
+
+        -- Default chat colours (the client sets these from its own defaults; without them
+        -- every chat type was white, e.g. the "Yell:" header and yells).
+        do
+            local defaults = {
+                SAY={1,1,1}, YELL={1,0.251,0.251}, EMOTE={1,0.502,0.251}, TEXT_EMOTE={1,0.502,0.251},
+                WHISPER={1,0.502,1}, WHISPER_INFORM={1,0.502,1}, PARTY={0.667,0.667,1}, PARTY_LEADER={0.463,0.784,1},
+                RAID={1,0.498,0}, RAID_LEADER={1,0.282,0.035}, RAID_WARNING={1,0.282,0},
+                GUILD={0.251,1,0.251}, OFFICER={0.251,0.753,0.251}, CHANNEL={1,0.753,0.753},
+                SYSTEM={1,1,0}, MONSTER_SAY={1,1,0.624}, MONSTER_YELL={1,0.251,0.251}, MONSTER_EMOTE={1,0.502,0.251},
+                MONSTER_WHISPER={1,0.71,0.922}, RAID_BOSS_EMOTE={1,0.867,0}, RAID_BOSS_WHISPER={1,0.71,0.922},
+                BATTLEGROUND={1,0.498,0}, BATTLEGROUND_LEADER={1,0.859,0.718},
+                LOOT={0,0.667,0}, MONEY={1,1,0}, SKILL={0.333,0.333,1}, OPENING={0.502,0.502,1}, TRADESKILLS={1,1,1},
+                COMBAT_XP_GAIN={0.435,0.435,1}, COMBAT_HONOR_GAIN={0.878,0.792,0.039}, COMBAT_FACTION_CHANGE={0.502,0.502,1},
+                ACHIEVEMENT={1,1,0}, GUILD_ACHIEVEMENT={0.251,1,0.251}, AFK={1,0.502,1}, DND={1,0.502,1}, IGNORED={1,0,0},
+                BG_SYSTEM_NEUTRAL={1,0.471,0.039}, BG_SYSTEM_ALLIANCE={0,0.682,0.937}, BG_SYSTEM_HORDE={1,0,0},
+                RESTRICTED={1,0,0}, FILTERED={1,0,0}, BN_WHISPER={0,1,0.965}, BN_WHISPER_INFORM={0,1,0.965},
+            }
+            for i = 1, 10 do defaults["CHANNEL" .. i] = {1,0.753,0.753} end
+            for chatType, c in pairs(defaults) do
+                local info = ChatTypeInfo[chatType]
+                if not info then info = {sticky = 0}; ChatTypeInfo[chatType] = info end
+                if info.r == nil or (info.r == 1 and info.g == 1 and info.b == 1) then
+                    info.r, info.g, info.b = c[1], c[2], c[3]
+                end
+            end
         end
 
         -- Missing event table entries

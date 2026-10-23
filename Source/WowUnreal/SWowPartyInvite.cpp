@@ -1,4 +1,5 @@
 #include "SWowPartyInvite.h"
+#include "WowWindowStyle.h"
 #include "WowConnectionManager.h"
 #include "WowOpcodes.h"
 #include "Widgets/SBoxPanel.h"
@@ -18,9 +19,7 @@ void SWowPartyInvite::Construct(const FArguments& InArgs)
 
     ChildSlot
     [
-        SNew(SBorder)
-        .BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-        .BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.05f, 0.95f))
+        SNew(SWowWindowFrame)
         .Padding(16.0f)
         [
             SNew(SVerticalBox)
@@ -42,8 +41,11 @@ void SWowPartyInvite::Construct(const FArguments& InArgs)
                 .FillWidth(1.0f)
                 .Padding(0, 0, 4, 0)
                 [
-                    SNew(SButton)
+                    SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .Text(FText::FromString(TEXT("Accept")))
+                    // Fire on press: a world click handler could otherwise take the mouse
+                    // capture between press and release, and the click never arrived.
+                    .ClickMethod(EButtonClickMethod::MouseDown)
                     .OnClicked(this, &SWowPartyInvite::OnAcceptClicked)
                     .ButtonColorAndOpacity(FLinearColor(0.0f, 0.6f, 0.0f))
                 ]
@@ -51,8 +53,9 @@ void SWowPartyInvite::Construct(const FArguments& InArgs)
                 .FillWidth(1.0f)
                 .Padding(4, 0, 0, 0)
                 [
-                    SNew(SButton)
+                    SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .Text(FText::FromString(TEXT("Decline")))
+                    .ClickMethod(EButtonClickMethod::MouseDown)
                     .OnClicked(this, &SWowPartyInvite::OnDeclineClicked)
                     .ButtonColorAndOpacity(FLinearColor(0.6f, 0.0f, 0.0f))
                 ]
@@ -73,8 +76,10 @@ FReply SWowPartyInvite::OnAcceptClicked()
 
     if (ConnectionManager.IsValid())
     {
-        // Send CMSG_GROUP_ACCEPT with no payload
+        // CMSG_GROUP_ACCEPT carries a uint32 (0) in 3.3.5; an empty packet is rejected by
+        // the server, so accepting silently did nothing.
         TArray<uint8> Data;
+        Data.AddZeroed(4);
         ConnectionManager->SendRawPacket(WowOpcode::CMSG_GROUP_ACCEPT, Data);
     }
 

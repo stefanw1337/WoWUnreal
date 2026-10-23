@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: WowUnreal UI
+## Notes: The WowUnreal client's own additions to the stock interface (always loaded, before other addons).
+## Author: WowUnreal
+## Version: 1.0
+Core.lua
+Popups.lua
+CastBars.lua
+GameMenu.lua
+WtfPrompt.lua

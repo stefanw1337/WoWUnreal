@@ -22,6 +22,8 @@ struct FWowTocData
 	TArray<FString> Files; // .lua and .xml files in load order
 	bool bLoadOnDemand = false;
 	bool bDisabled = false;
+	/** Every "## Key: Value" line, key lower-cased. */
+	TMap<FString, FString> Metadata;
 };
 
 class WOWUI_API FWowAddonLoader
@@ -32,6 +34,11 @@ public:
 
 	/** Discover addons in Interface/AddOns/ (filesystem + well-known Blizzard addons in MPQ) */
 	static TArray<FString> DiscoverAddons(FMpqManager* Mpq);
+
+	/** r364: an addon's .toc bytes for the AddOns list, discovery and load order, read once per
+	 *  session (and again after an AddOns folder gains or loses an addon). Loading an addon still
+	 *  reads its .toc fresh. */
+	static bool ReadTocCached(FMpqManager* Mpq, const FString& AddonName, TArray<uint8>& OutData);
 
 	/** Resolve dependency-ordered load list from discovered addons */
 	static TArray<FString> ResolveLoadOrder(FMpqManager* Mpq, const TArray<FString>& AddonNames);

@@ -12,7 +12,7 @@ DECLARE_DELEGATE(FOnCloseLoot);
 
 /**
  * WoW-style loot window widget
- * Dark panel with gold border, item list, Loot All button, and close button
+ * Compact item list; click an item to loot, shift-click to loot all
  */
 class WOWUI_API SWowLootWindow : public SCompoundWidget
 {
@@ -24,12 +24,18 @@ public:
     SLATE_END_ARGS()
 
     void Construct(const FArguments& InArgs);
+    void SetContext(class UWowConnectionManager* InConnection, class UWowUIManager* UI);
+    virtual void Tick(const FGeometry& Geometry, double Time, float Delta) override;
 
     /** Update the loot window with new data */
     void UpdateLoot(uint64 LootGuid, uint8 LootType, uint32 Gold, const TArray<FWowLootItem>& Items);
 
     /** Hide the loot window */
     void CloseLoot();
+    /** Local point inside the first lootable item (or money when there are no items). */
+    FVector2D GetFirstLootAnchor() const;
+    /** Laid-out position of the first slot (absolute), once the window has been arranged. */
+    bool GetFirstLootAbsoluteAnchor(FVector2D& OutAbsolute) const;
 
 private:
     FOnLootItem OnLootItem;
@@ -37,7 +43,18 @@ private:
     FOnCloseLoot OnCloseLoot;
 
     TSharedPtr<SVerticalBox> ItemList;
-    TSharedPtr<SButton> LootAllButton;
+    TSharedPtr<SButton> FirstLootButton;
+    TSharedPtr<SButton> GoldButton;
+    TSharedPtr<class SScrollBox> ItemScrollBox;
+    TWeakObjectPtr<class UWowConnectionManager> Connection;
+    TWeakObjectPtr<class UWowUIManager> UIManager;
+    TMap<FString, TSharedPtr<FSlateBrush>> IconBrushes;
+    uint32 LastRevision = 0;
+    const FSlateBrush* Icon(uint32 Entry, uint32 DisplayId);
+    const FSlateBrush* IconByPath(const FString& TexturePath);
+    TSharedRef<SWidget> MakeSlot(const FSlateBrush* IconBrush, const FText& Name, const FLinearColor& NameColor,
+        uint32 Count, bool bEnabled, TSharedPtr<SButton>& OutButton, FOnClicked OnClicked, TSharedPtr<class IToolTip> ToolTip);
+    void RefreshItems();
 
     uint64 CurrentLootGuid = 0;
     uint32 CurrentGold = 0;

@@ -1,4 +1,5 @@
 #include "Net/WowWorldSocket.h"
+#include <atomic>
 #include "WowSessionState.h"
 #include "Sockets.h"
 #include "SocketSubsystem.h"
@@ -16,7 +17,8 @@ static constexpr uint16 CMSG_CHAR_CREATE   = 0x0036;
 static constexpr uint16 CMSG_CHAR_ENUM     = 0x0037;
 static constexpr uint16 CMSG_CHAR_DELETE   = 0x0038;
 static constexpr uint16 CMSG_PLAYER_LOGIN  = 0x003D;
-static constexpr uint16 CMSG_KEEP_ALIVE    = 0x0406;
+static constexpr uint16 CMSG_PING          = 0x01DC;
+static constexpr uint16 SMSG_PONG          = 0x01DD;
 
 // Server -> Client
 static constexpr uint16 SMSG_AUTH_CHALLENGE      = 0x01EC;
@@ -45,6 +47,8 @@ FWowWorldSocket::~FWowWorldSocket()
 
 bool FWowWorldSocket::Connect(const FString& Host, int32 Port, const FString& InAccountName, const TArray<uint8>& InSessionKey, uint32 InRealmId)
 {
+    Disconnect();
+    CallbackActive = MakeShared<FThreadSafeBool, ESPMode::ThreadSafe>(true);
     AccountName = InAccountName.ToUpper();
     SessionKey  = InSessionKey;
     RealmId = InRealmId;
@@ -85,33 +89,54 @@ bool FWowWorldSocket::Connect(const FString& Host, int32 Port, const FString& In
 
     UE_LOG(LogWowWorld, Log, TEXT("Connected to world server %s:%d"), *Host, Port);
 
+    // Recv/Send must never block shutdown or hold the game thread behind I/O.
+    if (!Socket->SetNonBlocking(true))
+    {
+        Socket->Close();
+        SocketSub->DestroySocket(Socket);
+        Socket = nullptr;
+        return false;
+    }
+    ConnectedAt = FPlatformTime::Seconds();
+    bAuthenticated = false;
+    LastPingAt = 0.0;
+    PendingPingAt.Store(0.0);
+    LatencyMs.Store(0);
+    PingSequence = 0;
     bRunning   = true;
     bEncrypted = false;
     Thread = FRunnableThread::Create(this, TEXT("WowWorldSocket"), 0, TPri_Normal);
 
+    if (!Thread)
+    {
+        Disconnect();
+        return false;
+    }
     return true;
 }
 
 void FWowWorldSocket::Disconnect()
 {
+    *CallbackActive = false;
     bRunning = false;
 
-    {
-        FScopeLock Lock(&SocketLock);
-        if (Socket)
-        {
-            Socket->Close();
-            ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Socket);
-            Socket = nullptr;
-        }
-    }
-
+    // Only destroy the worker-owned socket after all nonblocking I/O has stopped.
     if (Thread)
     {
         Thread->WaitForCompletion();
         delete Thread;
         Thread = nullptr;
     }
+    if (Socket)
+    {
+        Socket->Close();
+        ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Socket);
+        Socket = nullptr;
+    }
+    TArray<uint8> Discarded;
+    while (SendQueue.Dequeue(Discarded)) {}
+    PendingPingAt.Store(0.0);
+
 }
 
 // ── FRunnable ──────────────────────────────────────────────────────────────────
@@ -125,36 +150,35 @@ uint32 FWowWorldSocket::Run()
 {
     while (bRunning)
     {
+        if (!UpdateHeartbeat()) return 1;
         // ── Flush outgoing send queue ──────────────────────────────────────
         {
             TArray<uint8> Queued;
-            while (SendQueue.Dequeue(Queued))
+            for (int32 Batch = 0; bRunning && Batch < 128 && SendQueue.Dequeue(Queued); ++Batch)
             {
-                FScopeLock Lock(&SocketLock);
+                if (bEncrypted) Crypt.EncryptSend(Queued.GetData(), 6);
                 if (!SendRawBytes(Queued.GetData(), Queued.Num()))
                 {
                     UE_LOG(LogWowWorld, Error, TEXT("Send failed, disconnecting"));
-                    bRunning = false;
+                    FailConnection(TEXT("Connection to the server was lost."));
                     return 1;
                 }
             }
         }
 
-        // ── Check if data available ────────────────────────────────────────
+        // A nonblocking peek distinguishes idle (true/0) from EOF (false/0)
+        // in UE's stream socket implementation. HasPendingData hides graceful EOF.
+        uint8 PeekByte = 0;
+        int32 Available = 0;
+        if (!Socket || !Socket->Recv(&PeekByte, 1, Available, ESocketReceiveFlags::Peek))
         {
-            FScopeLock Lock(&SocketLock);
-            if (!Socket)
-            {
-                bRunning = false;
-                return 1;
-            }
-
-            uint32 PendingData = 0;
-            if (!Socket->HasPendingData(PendingData) || PendingData == 0)
-            {
-                FPlatformProcess::Sleep(0.01f);
-                continue;
-            }
+            FailConnection(TEXT("The server closed the connection."));
+            return 1;
+        }
+        if (Available == 0)
+        {
+            FPlatformProcess::Sleep(0.01f);
+            continue;
         }
 
         // ── Read packet header ─────────────────────────────────────────────
@@ -167,7 +191,7 @@ uint32 FWowWorldSocket::Run()
             if (!RecvExact(Header, 4))
             {
                 UE_LOG(LogWowWorld, Error, TEXT("Failed to read unencrypted header"));
-                bRunning = false;
+                FailConnection(TEXT("Connection to the server was lost."));
                 return 1;
             }
 
@@ -175,6 +199,11 @@ uint32 FWowWorldSocket::Run()
             uint16 Opcode = Header[2] | (uint16(Header[3]) << 8);
 
             // Size includes the 2-byte opcode but not the size field itself
+            if (Size < 2)
+            {
+                FailConnection(TEXT("Invalid server packet header."));
+                return 1;
+            }
             int32 PayloadLen = Size - 2;
             TArray<uint8> Payload;
             if (PayloadLen > 0)
@@ -183,7 +212,7 @@ uint32 FWowWorldSocket::Run()
                 if (!RecvExact(Payload.GetData(), PayloadLen))
                 {
                     UE_LOG(LogWowWorld, Error, TEXT("Failed to read unencrypted payload"));
-                    bRunning = false;
+                    FailConnection(TEXT("Connection to the server was lost."));
                     return 1;
                 }
             }
@@ -208,7 +237,7 @@ uint32 FWowWorldSocket::Run()
             if (!RecvExact(Header, 4))
             {
                 UE_LOG(LogWowWorld, Error, TEXT("Failed to read encrypted header"));
-                bRunning = false;
+                FailConnection(TEXT("Connection to the server was lost."));
                 return 1;
             }
 
@@ -223,7 +252,7 @@ uint32 FWowWorldSocket::Run()
                 if (!RecvExact(Header + 4, 1))
                 {
                     UE_LOG(LogWowWorld, Error, TEXT("Failed to read large header byte"));
-                    bRunning = false;
+                    FailConnection(TEXT("Connection to the server was lost."));
                     return 1;
                 }
                 Crypt.DecryptRecv(Header + 4, 1);
@@ -238,6 +267,11 @@ uint32 FWowWorldSocket::Run()
                 Opcode = Header[2] | (uint16(Header[3]) << 8);
             }
 
+            if (Size < 2)
+            {
+                FailConnection(TEXT("Invalid server packet header."));
+                return 1;
+            }
             int32 PayloadLen = Size - 2; // size includes opcode (2 bytes) but not size field
             TArray<uint8> Payload;
             if (PayloadLen > 0)
@@ -246,7 +280,7 @@ uint32 FWowWorldSocket::Run()
                 if (!RecvExact(Payload.GetData(), PayloadLen))
                 {
                     UE_LOG(LogWowWorld, Error, TEXT("Failed to read encrypted payload (opcode=0x%04X, payloadLen=%d)"), Opcode, PayloadLen);
-                    bRunning = false;
+                    FailConnection(TEXT("Connection to the server was lost."));
                     return 1;
                 }
             }
@@ -254,6 +288,18 @@ uint32 FWowWorldSocket::Run()
             // Dispatch
             switch (Opcode)
             {
+            case SMSG_PONG:
+            {
+                uint32 Sequence = 0;
+                if (Payload.Num() == 4) FMemory::Memcpy(&Sequence, Payload.GetData(), 4);
+                const double SentAt = PendingPingAt.Load();
+                if (SentAt > 0.0 && Sequence == PingSequence)
+                {
+                    LatencyMs.Store(FMath::Max(1, FMath::RoundToInt((FPlatformTime::Seconds() - SentAt) * 1000.0)));
+                    PendingPingAt.Store(0.0);
+                }
+                break;
+            }
             case SMSG_AUTH_RESPONSE:
                 HandleAuthResponse(Payload);
                 break;
@@ -268,10 +314,7 @@ uint32 FWowWorldSocket::Run()
                 UE_LOG(LogWowWorld, Log, TEXT("Received %s result: 0x%02X"),
                     Opcode == SMSG_CHAR_CREATE ? TEXT("SMSG_CHAR_CREATE") : TEXT("SMSG_CHAR_DELETE"), Result);
                 // Forward to game thread for UI handling
-                AsyncTask(ENamedThreads::GameThread, [this, Opcode, Payload]()
-                {
-                    OnPacket.ExecuteIfBound(Opcode, Payload);
-                });
+                AsyncTask(ENamedThreads::GameThread, [Callback = OnPacket, Active = CallbackActive, Opcode, Payload]() { if (*Active) Callback.ExecuteIfBound(Opcode, Payload); });
                 break;
             }
             case SMSG_ADDON_INFO:
@@ -279,10 +322,7 @@ uint32 FWowWorldSocket::Run()
                 break;
             default:
                 UE_LOG(LogWowWorld, Verbose, TEXT("Recv opcode=0x%04X size=%d"), Opcode, Size);
-                AsyncTask(ENamedThreads::GameThread, [this, Opcode, Payload]()
-                {
-                    OnPacket.ExecuteIfBound(Opcode, Payload);
-                });
+                AsyncTask(ENamedThreads::GameThread, [Callback = OnPacket, Active = CallbackActive, Opcode, Payload]() { if (*Active) Callback.ExecuteIfBound(Opcode, Payload); });
                 break;
             }
         }
@@ -304,7 +344,7 @@ void FWowWorldSocket::HandleAuthChallenge(const TArray<uint8>& Data)
     if (Data.Num() < 4 + 4 + 16 + 16)
     {
         UE_LOG(LogWowWorld, Error, TEXT("AUTH_CHALLENGE too short: %d bytes"), Data.Num());
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         bRunning = false;
         return;
     }
@@ -409,11 +449,10 @@ void FWowWorldSocket::HandleAuthChallenge(const TArray<uint8>& Data)
     Packet.Append(Payload);
 
     {
-        FScopeLock Lock(&SocketLock);
         if (!SendRawBytes(Packet.GetData(), Packet.Num()))
         {
             UE_LOG(LogWowWorld, Error, TEXT("Failed to send CMSG_AUTH_SESSION"));
-            AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+            AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
             bRunning = false;
             return;
         }
@@ -430,12 +469,15 @@ void FWowWorldSocket::HandleAuthChallenge(const TArray<uint8>& Data)
 
 // ── Auth Response Handler ──────────────────────────────────────────────────────
 
+static std::atomic<int32> GWowLastAccountExpansion{-1};
+int32 FWowWorldSocket::GetLastAccountExpansion() { return GWowLastAccountExpansion.load(); }
+
 void FWowWorldSocket::HandleAuthResponse(const TArray<uint8>& Data)
 {
     if (Data.Num() < 1)
     {
         UE_LOG(LogWowWorld, Error, TEXT("AUTH_RESPONSE too short"));
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         bRunning = false;
         return;
     }
@@ -444,13 +486,16 @@ void FWowWorldSocket::HandleAuthResponse(const TArray<uint8>& Data)
 
     if (Result == AUTH_OK)
     {
-        UE_LOG(LogWowWorld, Log, TEXT("World authentication successful (AUTH_OK)"));
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(true); });
+        bAuthenticated = true;
+        // AUTH_OK: uint32 billing time left, uint8 billing flags, uint32 billing time rested, uint8 expansion.
+        GWowLastAccountExpansion = Data.Num() >= 11 ? int32(Data[10]) : -1;
+        UE_LOG(LogWowWorld, Log, TEXT("World authentication successful (AUTH_OK), account expansion %d"), GWowLastAccountExpansion.load());
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(true); });
     }
     else
     {
         UE_LOG(LogWowWorld, Error, TEXT("World authentication failed: result=0x%02X"), Result);
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
     }
 }
 
@@ -499,7 +544,11 @@ void FWowWorldSocket::HandleCharEnum(const TArray<uint8>& Data)
 
         // uint8 skin, face, hairStyle, hairColor, facialHair
         if (Offset + 5 > Data.Num()) break;
-        Offset += 5; // skip appearance
+        Info.Skin = Data[Offset++];
+        Info.Face = Data[Offset++];
+        Info.HairStyle = Data[Offset++];
+        Info.HairColor = Data[Offset++];
+        Info.FacialHair = Data[Offset++];
 
         // uint8 level
         if (Offset + 1 > Data.Num()) break;
@@ -527,9 +576,12 @@ void FWowWorldSocket::HandleCharEnum(const TArray<uint8>& Data)
         if (Offset + 4 > Data.Num()) break;
         Offset += 4;
 
-        // uint32 charFlags
+        // uint32 charFlags (r224: 0x400 helm hidden, 0x800 cloak hidden - Show Helm / Show Cloak)
         if (Offset + 4 > Data.Num()) break;
+        uint32 CharFlags = 0;
+        FMemory::Memcpy(&CharFlags, Data.GetData() + Offset, 4);
         Offset += 4;
+        Info.CharacterFlags = int32(CharFlags); // r413: the ghost flag (0x2000) for character selection
 
         // uint32 recustomizationFlags
         if (Offset + 4 > Data.Num()) break;
@@ -562,6 +614,9 @@ void FWowWorldSocket::HandleCharEnum(const TArray<uint8>& Data)
             Equipment.EnchantAuraId = static_cast<int32>(TempAuraId);
             Offset += 4;
 
+            // r224: like the original character select, a hidden helm or cloak is not drawn.
+            if ((SlotIdx == 0 && (CharFlags & 0x400u)) || (SlotIdx == 14 && (CharFlags & 0x800u)))
+                Equipment.DisplayId = 0;
             Info.Equipment.Add(Equipment);
         }
 
@@ -586,10 +641,7 @@ void FWowWorldSocket::HandleCharEnum(const TArray<uint8>& Data)
 
     UE_LOG(LogWowWorld, Log, TEXT("Received %d characters"), Characters.Num());
 
-    AsyncTask(ENamedThreads::GameThread, [this, Characters]()
-    {
-        OnCharacterList.ExecuteIfBound(Characters);
-    });
+    AsyncTask(ENamedThreads::GameThread, [Callback = OnCharacterList, Active = CallbackActive, Characters]() { if (*Active) Callback.ExecuteIfBound(Characters); });
 }
 
 // ── Send Helpers ───────────────────────────────────────────────────────────────
@@ -646,6 +698,7 @@ void FWowWorldSocket::SendPlayerLogin(uint64 Guid)
 
 void FWowWorldSocket::SendPacket(uint32 Opcode, const TArray<uint8>& Data)
 {
+    if (!bRunning || Data.Num() > 65531) return;
     // Client packet header: 2 bytes size (big-endian) + 4 bytes opcode (little-endian)
     // Size = payload + 4 (opcode)
     uint16 PacketSize = static_cast<uint16>(Data.Num() + 4);
@@ -666,64 +719,94 @@ void FWowWorldSocket::SendPacket(uint32 Opcode, const TArray<uint8>& Data)
         FMemory::Memcpy(Packet.GetData() + 6, Data.GetData(), Data.Num());
     }
 
-    // Encrypt the header (first 6 bytes: 2 size + 4 opcode)
-    if (bEncrypted)
-    {
-        Crypt.EncryptSend(Packet.GetData(), 6);
-    }
-
+    // Encrypt only on the worker, in the exact order packets go on the wire.
     SendQueue.Enqueue(MoveTemp(Packet));
 }
 
 // ── Raw I/O ────────────────────────────────────────────────────────────────────
 
-bool FWowWorldSocket::SendRawBytes(const uint8* Data, int32 Len)
+void FWowWorldSocket::FailConnection(const FString& Reason)
 {
-    if (!Socket) return false;
-
-    int32 TotalSent = 0;
-    while (TotalSent < Len)
+    if (!bRunning) return; // user disconnect/shutdown does not report a network failure
+    bRunning = false;
+    UE_LOG(LogWowWorld, Warning, TEXT("World connection ended: %s"), *Reason);
+    AsyncTask(ENamedThreads::GameThread, [Callback = OnDisconnected, Active = CallbackActive, Reason]()
     {
-        int32 Sent = 0;
-        if (!Socket->Send(Data + TotalSent, Len - TotalSent, Sent))
+        if (*Active) Callback.ExecuteIfBound(Reason);
+    });
+}
+
+int32 FWowWorldSocket::GetLatencyMs() const
+{
+    const double SentAt = PendingPingAt.Load();
+    const int32 PendingMs = SentAt > 0.0
+        ? FMath::Clamp(FMath::RoundToInt((FPlatformTime::Seconds() - SentAt) * 1000.0), 0, 60000) : 0;
+    return FMath::Max(LatencyMs.Load(), PendingMs);
+}
+
+bool FWowWorldSocket::UpdateHeartbeat()
+{
+    const double Now = FPlatformTime::Seconds();
+    if (!bAuthenticated)
+    {
+        if (Now - ConnectedAt > 30.0)
         {
+            FailConnection(TEXT("The world server did not finish authentication."));
             return false;
         }
-        if (Sent <= 0) return false;
-        TotalSent += Sent;
+        return true;
+    }
+    const double SentAt = PendingPingAt.Load();
+    if (SentAt > 0.0 && Now - SentAt >= 30.0)
+    {
+        FailConnection(TEXT("The server stopped responding. Please reconnect."));
+        return false;
+    }
+    // AzerothCore rejects repeated pings less than 27 seconds apart.
+    // One outstanding sequence; ordinary quiet gameplay never causes a timeout.
+    if (SentAt == 0.0 && (LastPingAt == 0.0 || Now - LastPingAt >= 30.0))
+    {
+        ++PingSequence;
+        const uint32 Latency = static_cast<uint32>(LatencyMs.Load());
+        TArray<uint8> Payload;
+        Payload.Append(reinterpret_cast<const uint8*>(&PingSequence), 4);
+        Payload.Append(reinterpret_cast<const uint8*>(&Latency), 4);
+        LastPingAt = Now;
+        PendingPingAt.Store(Now);
+        SendPacket(CMSG_PING, Payload);
     }
     return true;
 }
 
+bool FWowWorldSocket::SendRawBytes(const uint8* Data, int32 Len)
+{
+    if (!Socket) return false;
+    const double Deadline = FPlatformTime::Seconds() + 5.0;
+    int32 TotalSent = 0;
+    while (TotalSent < Len && bRunning)
+    {
+        int32 Sent = 0;
+        const bool Success = Socket->Send(Data + TotalSent, Len - TotalSent, Sent);
+        if (!Success && ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->GetLastErrorCode() != SE_EWOULDBLOCK)
+            return false;
+        if (Sent > 0) TotalSent += Sent;
+        else FPlatformProcess::Sleep(0.005f);
+        if (FPlatformTime::Seconds() >= Deadline) return false;
+    }
+    return TotalSent == Len;
+}
+
 bool FWowWorldSocket::RecvExact(uint8* Buffer, int32 Len)
 {
+    const double Deadline = FPlatformTime::Seconds() + 30.0;
     int32 TotalRead = 0;
-    constexpr double TimeoutSeconds = 30.0;
-    double IdleStart = FPlatformTime::Seconds();
-
     while (TotalRead < Len && bRunning)
     {
         int32 BytesRead = 0;
-        {
-            FScopeLock Lock(&SocketLock);
-            if (!Socket) return false;
-            if (!Socket->Recv(Buffer + TotalRead, Len - TotalRead, BytesRead))
-            {
-                return false;
-            }
-        }
-        if (BytesRead == 0)
-        {
-            if (FPlatformTime::Seconds() - IdleStart > TimeoutSeconds)
-            {
-                UE_LOG(LogWowWorld, Error, TEXT("Socket recv timed out after %.0fs"), TimeoutSeconds);
-                return false;
-            }
-            FPlatformProcess::Sleep(0.01f);
-            continue;
-        }
+        if (!Socket || !Socket->Recv(Buffer + TotalRead, Len - TotalRead, BytesRead)) return false;
         TotalRead += BytesRead;
-        IdleStart = FPlatformTime::Seconds();
+        if (FPlatformTime::Seconds() >= Deadline) return false;
+        if (BytesRead == 0) FPlatformProcess::Sleep(0.005f);
     }
     return TotalRead == Len;
 }

@@ -9,14 +9,14 @@ struct FItemDisplayInfoDbcEntry
     FString ModelTextures[2];       // 3-4
     FString Icon1;                  // 5
     FString Icon2;                  // 6
-    uint32 GeosetGroups[6]{};       // 7-12 (WoW 3.3.5 has 6 geoset groups)
-    uint32 Flags = 0;               // 13
-    uint32 SpellVisualID = 0;       // 14
-    uint32 GroupSoundIndex = 0;     // 15
-    uint32 HelmetGeosetVis[2]{};    // 16-17
-    FString TextureOverlays[8];     // 18-25
-    uint32 ItemVisual = 0;          // 26
-    uint32 ParticleColorID = 0;     // 27
+    uint32 GeosetGroups[6]{};       // 7-9 in Wrath; remaining entries reserved/zero
+    uint32 Flags = 0;               // 10
+    uint32 SpellVisualID = 0;       // 11
+    uint32 GroupSoundIndex = 0;     // 12
+    uint32 HelmetGeosetVis[2]{};    // 13-14
+    FString TextureOverlays[8];     // 15-22
+    uint32 ItemVisual = 0;          // 23
+    uint32 ParticleColorID = 0;     // 24
 };
 
 class WOWDATA_API FItemDisplayInfoDbc

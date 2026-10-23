@@ -1,4 +1,5 @@
 #include "SWowDuelInvite.h"
+#include "WowWindowStyle.h"
 
 #include "WowConnectionManager.h"
 #include "Widgets/SBoxPanel.h"
@@ -18,9 +19,7 @@ void SWowDuelInvite::Construct(const FArguments& InArgs)
 
     ChildSlot
     [
-        SNew(SBorder)
-        .BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
-        .BorderBackgroundColor(FLinearColor(0.08f, 0.04f, 0.04f, 0.96f))
+        SNew(SWowWindowFrame)
         .Padding(16.0f)
         [
             SNew(SVerticalBox)
@@ -43,7 +42,7 @@ void SWowDuelInvite::Construct(const FArguments& InArgs)
                 .FillWidth(1.0f)
                 .Padding(0, 0, 4, 0)
                 [
-                    SNew(SButton)
+                    SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .Text(FText::FromString(TEXT("Accept")))
                     .OnClicked(this, &SWowDuelInvite::OnAcceptClicked)
                     .ButtonColorAndOpacity(FLinearColor(0.0f, 0.55f, 0.0f))
@@ -52,7 +51,7 @@ void SWowDuelInvite::Construct(const FArguments& InArgs)
                 .FillWidth(1.0f)
                 .Padding(4, 0, 0, 0)
                 [
-                    SNew(SButton)
+                    SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .Text(FText::FromString(TEXT("Decline")))
                     .OnClicked(this, &SWowDuelInvite::OnDeclineClicked)
                     .ButtonColorAndOpacity(FLinearColor(0.55f, 0.0f, 0.0f))

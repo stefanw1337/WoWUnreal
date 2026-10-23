@@ -16,7 +16,10 @@ bool FCharStartOutfitDbc::Load(const FDbcParser& Parser)
         FCharStartOutfitDbcEntry E;
         E.ID = Parser.GetUInt(i, 0);
 
-        // Try packed format first (WoW 3.3.5 format: Race/Class/Gender packed into col 1)
+        // WoW 3.3.5 stores Race/Class/Gender/Outfit as four bytes in field 1.
+        // The following 72 fields are ItemID[24], DisplayItemID[24], and
+        // InventoryType[24].  ItemID is deliberately skipped here because the
+        // character renderer consumes display IDs.
         uint32 PackedCol = Parser.GetUInt(i, 1);
         E.RaceID = PackedCol & 0xFF;         // byte 0
         E.ClassID = (PackedCol >> 8) & 0xFF; // byte 1
@@ -41,13 +44,13 @@ bool FCharStartOutfitDbc::Load(const FDbcParser& Parser)
         }
         else
         {
-            // Packed format: col 1 = packed Race/Class/Gender
-            // Columns 2-25: ItemDisplayId
-            // Columns 26-49: ItemInventorySlot
+            // Packed format changes only how the race/class/gender header is
+            // represented; the three 24-entry item arrays retain their normal
+            // offsets.
             for (int32 j = 0; j < 24; ++j)
             {
-                E.ItemDisplayIds[j] = static_cast<int32>(Parser.GetUInt(i, 2 + j));
-                E.ItemInventorySlots[j] = static_cast<int32>(Parser.GetUInt(i, 26 + j));
+                E.ItemDisplayIds[j] = static_cast<int32>(Parser.GetUInt(i, 26 + j));
+                E.ItemInventorySlots[j] = static_cast<int32>(Parser.GetUInt(i, 50 + j));
             }
         }
 

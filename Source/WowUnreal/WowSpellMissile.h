@@ -1,48 +1,29 @@
 #pragma once
-
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "Components/StaticMeshComponent.h"
-#include "Components/PointLightComponent.h"
-#include "Materials/MaterialInstanceDynamic.h"
-#include "Engine/StaticMesh.h"
-#include "Materials/Material.h"
 #include "WowSpellMissile.generated.h"
 
+/** Moves an authored MPQ spell model and triggers impact when it arrives. */
 UCLASS()
 class WOWUNREAL_API AWowSpellMissile : public AActor
 {
     GENERATED_BODY()
-
 public:
     AWowSpellMissile();
-
-    /** Initialize the missile with start/end positions and spell school color */
-    void Initialize(const FVector& StartLocation, const FVector& TargetLocation, const FLinearColor& SpellColor, float TravelTime = 1.0f);
-
-    virtual void BeginPlay() override;
+    void InitializeAuthored(AActor* Visual, AActor* Target, float Speed,
+        TFunction<void()> OnImpact);
+    /** r698: a critical hit turns the bolt toward this socket of the target (smoothly, not a jump). */
+    void AimAtSocket(FName Socket);
     virtual void Tick(float DeltaTime) override;
-
-protected:
-    /** Sphere mesh component for the missile */
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-    TObjectPtr<UStaticMeshComponent> SphereMesh;
-
-    /** Dynamic material instance for changing color */
-    UPROPERTY()
-    TObjectPtr<UMaterialInstanceDynamic> DynamicMaterial;
-
-    /** Point light component for ambient glow */
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-    TObjectPtr<UPointLightComponent> GlowLight;
-
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 private:
-    FVector StartPos;
-    FVector EndPos;
-    float TotalTravelTime;
-    float CurrentTime;
-    bool bIsInitialized;
-
-    void UpdatePosition();
-    void OnReachedTarget();
+    UPROPERTY() TObjectPtr<AActor> VisualActor;
+    TWeakObjectPtr<AActor> TargetActor;
+    FVector StartPosition = FVector::ZeroVector;
+    FVector TargetOffset = FVector::ZeroVector;
+    float TravelDuration = 0.1f;
+    float Elapsed = 0.0f;
+    TFunction<void()> ImpactCallback;
+    TWeakObjectPtr<class USkeletalMeshComponent> AimMesh;
+    FName AimSocket = NAME_None;
 };

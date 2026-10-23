@@ -1,4 +1,6 @@
 #include "WowSkeletalMeshBuilder.h"
+#include "WowPerformanceScope.h"
+#include "WowRuntimeAnimSequence.h"
 #include "Formats/M2Types.h"
 #include "Formats/BlpParser.h"
 #include "Formats/BlpTypes.h"
@@ -10,6 +12,7 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimData/IAnimationDataController.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshSocket.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "MeshDescription.h"
@@ -24,6 +27,7 @@
 #include "Interfaces/ITargetPlatformManagerModule.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogWowSkelMesh, Log, All);
+void WowBuildRuntimeSkeletalMesh(USkeletalMesh*, const FM2Data&, const TArray<int32>&, const TArray<int32>&);
 
 FName FWowSkeletalMeshBuilder::GetBoneName(int32 BoneIndex)
 {
@@ -168,6 +172,121 @@ USkeleton* FWowSkeletalMeshBuilder::CreateSkeleton(const FM2Data& Data, const FS
 		}
 	}
 
+	// M2 key-bone 6 is the animated head. Expose a stable socket name so the
+	// first-person camera can follow the correct anatomy for every race without
+	// hard-coding a raw bone index.
+	int32 HeadBoneIndex = INDEX_NONE;
+	for (int32 BoneIndex = 0; BoneIndex < Data.Bones.Num(); ++BoneIndex)
+	{
+		if (Data.Bones[BoneIndex].KeyBoneId == 6)
+		{
+			HeadBoneIndex = BoneIndex;
+			break;
+		}
+	}
+	if (HeadBoneIndex != INDEX_NONE)
+	{
+		USkeletalMeshSocket* HeadSocket = NewObject<USkeletalMeshSocket>(Skeleton);
+		HeadSocket->SocketName = TEXT("WowFirstPersonHead");
+		HeadSocket->BoneName = GetBoneName(HeadBoneIndex);
+		HeadSocket->bForceAlwaysAnimated = true;
+		Skeleton->Sockets.Add(HeadSocket);
+	}
+
+	// SpellVisualKit addresses the character's palms by M2 attachment id.
+	// Stable socket names let runtime spell effects follow the animated hands
+	// without guessing raw bone indices (which differ between race/gender rigs).
+	auto AddAttachmentSocket = [Skeleton, &Data](uint32 AttachmentId, const FName SocketName, bool bStableStaffBack = false)
+	{
+		const FM2Attachment* FoundAttachment = nullptr;
+		if (Data.AttachmentLookup.IsValidIndex(static_cast<int32>(AttachmentId)))
+		{
+			const int16 AttachmentIndex = Data.AttachmentLookup[AttachmentId];
+			if (Data.Attachments.IsValidIndex(AttachmentIndex))
+			{
+				FoundAttachment = &Data.Attachments[AttachmentIndex];
+			}
+		}
+		if (!FoundAttachment)
+		{
+			FoundAttachment = Data.Attachments.FindByPredicate(
+				[AttachmentId](const FM2Attachment& Attachment)
+				{
+					return Attachment.Id == AttachmentId;
+				});
+		}
+		if (!FoundAttachment || !Data.Bones.IsValidIndex(FoundAttachment->Bone))
+		{
+			return;
+		}
+
+		USkeletalMeshSocket* Socket = NewObject<USkeletalMeshSocket>(Skeleton);
+		Socket->SocketName = SocketName;
+		Socket->BoneName = GetBoneName(FoundAttachment->Bone);
+		// M2 attachment positions are stored in model space, while an Unreal
+		// socket transform is bone-relative. Subtract the owning bone's model-
+		// space pivot or the pivot is applied twice (weapons float behind/above
+		// the character and hand spell effects land near the head).
+		const FVector RelativeAttachment =
+			FoundAttachment->Position - Data.Bones[FoundAttachment->Bone].PivotPoint;
+		Socket->RelativeLocation = FVector(
+			RelativeAttachment.Y * FWowCoordinate::SCALE,
+			RelativeAttachment.X * FWowCoordinate::SCALE,
+			RelativeAttachment.Z * FWowCoordinate::SCALE);
+        if (bStableStaffBack)
+        {
+            // Freeze only the dedicated attachment bone in its authored Stand
+            // pose. Its torso parent still animates normally during walk/run.
+            const FM2Bone& Bone = Data.Bones[FoundAttachment->Bone];
+            if (Data.Bones.IsValidIndex(Bone.ParentBone))
+            {
+                FVector Translation = Bone.PivotPoint - Data.Bones[Bone.ParentBone].PivotPoint;
+                FQuat Rotation = FQuat::Identity;
+                FVector Scale = FVector::OneVector;
+                if (const FM2AnimationData* Stand = Data.AnimationTracks.FindByPredicate(
+                    [](const FM2AnimationData& A) { return A.AnimationId == 0 && A.SubAnimationId == 0; }))
+                {
+                    if (Stand->BoneTracks.IsValidIndex(FoundAttachment->Bone))
+                    {
+                        const FM2BoneTrack& Track = Stand->BoneTracks[FoundAttachment->Bone];
+                        if (!Track.TransValues.IsEmpty()) Translation += Track.TransValues[0];
+                        if (!Track.RotValues.IsEmpty()) Rotation = Track.RotValues[0];
+                        if (!Track.ScaleValues.IsEmpty()) Scale = Track.ScaleValues[0];
+                    }
+                }
+                FTransform Idle(FQuat(Rotation.Y, Rotation.X, Rotation.Z, -Rotation.W).GetNormalized(),
+                    FVector(Translation.Y, Translation.X, Translation.Z) * FWowCoordinate::SCALE,
+                    FVector(Scale.Y, Scale.X, Scale.Z));
+                Socket->BoneName = GetBoneName(Bone.ParentBone);
+                Socket->RelativeLocation = Idle.TransformPosition(Socket->RelativeLocation);
+                Socket->RelativeRotation = Idle.Rotator();
+                Socket->RelativeScale = Idle.GetScale3D();
+            }
+        }
+		Socket->bForceAlwaysAnimated = true;
+		Skeleton->Sockets.Add(Socket);
+	};
+    AddAttachmentSocket(15, TEXT("WowSpellChest"));
+    AddAttachmentSocket(17, TEXT("WowSpellBreath"));
+    AddAttachmentSocket(19, TEXT("WowSpellBase"));
+    AddAttachmentSocket(20, TEXT("WowSpellHead"));
+	AddAttachmentSocket(1, TEXT("WowSpellRightHand"));
+	AddAttachmentSocket(2, TEXT("WowSpellLeftHand"));
+	AddAttachmentSocket(0, TEXT("WowMountSeat"));
+	AddAttachmentSocket(26, TEXT("WowSheathMainHand"));
+	AddAttachmentSocket(27, TEXT("WowSheathOffHand"));
+	AddAttachmentSocket(28, TEXT("WowSheathShield"));
+    AddAttachmentSocket(30, TEXT("WowStaffBackLeft"), true);
+    AddAttachmentSocket(31, TEXT("WowStaffBackRight"), true);
+	AddAttachmentSocket(30, TEXT("WowSheathLargeWeaponLeft"));
+	AddAttachmentSocket(31, TEXT("WowSheathLargeWeaponRight"));
+	AddAttachmentSocket(32, TEXT("WowSheathHipWeaponLeft"));
+	AddAttachmentSocket(33, TEXT("WowSheathHipWeaponRight"));
+    // Every attachment point by number, for spell model attachments (SpellVisualKitModelAttach:
+    // wings on the back are attachment 12; r262).
+    for (int32 AttachmentId = 0; AttachmentId <= 56; ++AttachmentId)
+        AddAttachmentSocket(AttachmentId, FName(*FString::Printf(TEXT("WowAttach_%d"), AttachmentId)));
+
 	UE_LOG(LogWowSkelMesh, Log, TEXT("Created skeleton '%s' with %d bones (%d roots, primary=%d)"),
 		*ModelName, NumBones, Roots.Num(), PrimaryRoot);
 	return Skeleton;
@@ -178,6 +297,7 @@ USkeletalMesh* FWowSkeletalMeshBuilder::CreateSkeletalMesh(const FM2Data& Data, 
 	TArray<FGeosetSectionInfo>* OutGeosetInfo,
 	const TMap<uint16, uint16>* VisibleGeosets)
 {
+    FWowPerformanceScope Timing(TEXT("skeletal-mesh-build"), ModelName);
 	if (!Skeleton || Data.Vertices.Num() == 0 || Data.Indices.Num() == 0)
 	{
 		return nullptr;
@@ -264,6 +384,21 @@ USkeletalMesh* FWowSkeletalMeshBuilder::CreateSkeletalMesh(const FM2Data& Data, 
 
 			bool bInclude = true;
 
+			// r308 (Stefan: the voidwalker's bracers hung behind and above its arms): passes whose
+			// transparency or colour alpha is 0 throughout the Stand sequence are invisible in the
+			// original client (the voidwalker's two shoulder-height pieces on bones 3/4 are keyed 0
+			// in every sequence). Drawing them left loose parts floating beside the model.
+			auto StaticallyHidden = [](const FM2MaterialTrack& Track)
+			{
+				if (Track.Values.IsEmpty()) return false;
+				for (const float Value : Track.Values) if (Value > 0.004f) return false;
+				return true;
+			};
+			if (StaticallyHidden(Pass.TextureWeight) || StaticallyHidden(Pass.ColorAlpha))
+			{
+				bInclude = false;
+			}
+
 			// Skip hair-textured passes (type 6) in the body mesh — hair gets its own mesh
 			if (VisibleGeosets && Pass.TextureIndex < static_cast<uint16>(Data.TextureTypes.Num()) &&
 				Data.TextureTypes[Pass.TextureIndex] == 6)
@@ -296,12 +431,28 @@ USkeletalMesh* FWowSkeletalMeshBuilder::CreateSkeletalMesh(const FM2Data& Data, 
 		VisiblePasses.Add(0); // Single section for models without render passes
 	}
 
+	// r613 (Stefan: the HD pack's login screen - a backported Shadowlands/Icecrown glue scene - showed
+	// the sky and shard cards over the Icecrown gate walls): a glue scene is a stack of see-through
+	// cards with no depth writes, which the client draws in the texture units' priority-plane order
+	// (sky -65 ... walls -30 ... vignette +10). UE draws a mesh's translucent sections in section order,
+	// so the passes are sorted by priority plane (stable: equal planes keep the file order). Only glue
+	// models (Interface\Glues\...), whose sections nothing else indexes by pass number.
+	if (bHasRenderPasses && ModelName.Contains(TEXT("Glues"), ESearchCase::IgnoreCase))
+		VisiblePasses.StableSort([&Data](int32 A, int32 B)
+			{ return Data.RenderPasses[A].PriorityPlane < Data.RenderPasses[B].PriorityPlane; });
 	const int32 NumSections = VisiblePasses.Num();
 	TArray<FPolygonGroupID> PolyGroups;
 	PolyGroups.SetNum(NumSections);
+	auto PolygonGroupMaterialSlotNames = SkelAttrs.GetPolygonGroupMaterialSlotNames();
 	for (int32 i = 0; i < NumSections; ++i)
 	{
 		PolyGroups[i] = MeshDesc.CreatePolygonGroup();
+		// CommitMeshDescription resolves skeletal sections through the imported
+		// material slot name. Without this attribute every polygon group is
+		// assigned to slot zero, so multi-texture M2s render one texture over
+		// the entire model (especially visible in character-select ModelFFX).
+		PolygonGroupMaterialSlotNames[PolyGroups[i]] =
+			FName(*FString::Printf(TEXT("Section_%d"), i));
 	}
 
 	// Map from visible pass index to original render pass index
@@ -316,6 +467,7 @@ USkeletalMesh* FWowSkeletalMeshBuilder::CreateSkeletalMesh(const FM2Data& Data, 
 			if (bHasRenderPasses)
 			{
 				int32 OrigPassIdx = VisiblePasses[i];
+                Info.RenderPassIndex = OrigPassIdx;
 				const FM2RenderPass& Pass = Data.RenderPasses[OrigPassIdx];
 				if (Pass.SubmeshIndex < static_cast<uint16>(Data.Submeshes.Num()))
 				{
@@ -323,9 +475,18 @@ USkeletalMesh* FWowSkeletalMeshBuilder::CreateSkeletalMesh(const FM2Data& Data, 
 					Info.GeosetGroup = Info.GeosetId / 100;
 					Info.GeosetVariant = Info.GeosetId % 100;
 					Info.TextureIndex = Pass.TextureIndex;
+					Info.BlendMode = Pass.BlendMode;
+                    Info.UVScrollSpeed = Pass.UVScrollSpeed;
+					Info.RenderFlags = Pass.Flags;
 				}
 			}
 		}
+	}
+
+	if (WowUseRuntimeM2Import())
+	{
+		WowBuildRuntimeSkeletalMesh(SkelMesh, Data, BoneRemapTable, VisiblePasses);
+		return SkelMesh;
 	}
 
 	MeshDesc.ReserveNewVertices(NumVerts);
@@ -583,9 +744,73 @@ USkeletalMesh* FWowSkeletalMeshBuilder::CreateSkeletalMeshByTextureType(const FM
 }
 
 TArray<UAnimSequence*> FWowSkeletalMeshBuilder::CreateAnimations(const FM2Data& Data,
-	USkeleton* Skeleton, const FString& ModelName)
+	USkeleton* Skeleton, const FString& ModelName, const TSet<int32>* AnimationIds,
+	TArray<int32>* OutAnimationIds, bool bFirstVariantOnly)
 {
+    FWowPerformanceScope Timing(TEXT("animation-import"), ModelName);
+	if (OutAnimationIds)
+	{
+		OutAnimationIds->Reset();
+	}
+
+	auto SampleVectorTrack = [](const TArray<uint32>& Times, const TArray<FVector>& Values,
+		float TimeMs, float DurationMs, bool bLooping, const FVector& DefaultValue)
+	{
+		const int32 Count = FMath::Min(Times.Num(), Values.Num());
+		if (Count <= 0) return DefaultValue;
+		if (Count == 1 || TimeMs <= static_cast<float>(Times[0])) return Values[0];
+
+		for (int32 Index = 1; Index < Count; ++Index)
+		{
+			if (TimeMs <= static_cast<float>(Times[Index]))
+			{
+				const float Span = static_cast<float>(Times[Index] - Times[Index - 1]);
+				const float Alpha = Span > SMALL_NUMBER
+					? FMath::Clamp((TimeMs - Times[Index - 1]) / Span, 0.0f, 1.0f) : 0.0f;
+				return FMath::Lerp(Values[Index - 1], Values[Index], Alpha);
+			}
+		}
+
+		if (bLooping && DurationMs > static_cast<float>(Times[Count - 1]))
+		{
+			const float Span = DurationMs - Times[Count - 1] + Times[0];
+			const float Alpha = Span > SMALL_NUMBER
+				? FMath::Clamp((TimeMs - Times[Count - 1]) / Span, 0.0f, 1.0f) : 1.0f;
+			return FMath::Lerp(Values[Count - 1], Values[0], Alpha);
+		}
+		return Values[Count - 1];
+	};
+
+	auto SampleRotationTrack = [](const TArray<uint32>& Times, const TArray<FQuat>& Values,
+		float TimeMs, float DurationMs, bool bLooping, const FQuat& DefaultValue)
+	{
+		const int32 Count = FMath::Min(Times.Num(), Values.Num());
+		if (Count <= 0) return DefaultValue;
+		if (Count == 1 || TimeMs <= static_cast<float>(Times[0])) return Values[0];
+
+		for (int32 Index = 1; Index < Count; ++Index)
+		{
+			if (TimeMs <= static_cast<float>(Times[Index]))
+			{
+				const float Span = static_cast<float>(Times[Index] - Times[Index - 1]);
+				const float Alpha = Span > SMALL_NUMBER
+					? FMath::Clamp((TimeMs - Times[Index - 1]) / Span, 0.0f, 1.0f) : 0.0f;
+				return FQuat::Slerp(Values[Index - 1], Values[Index], Alpha).GetNormalized();
+			}
+		}
+
+		if (bLooping && DurationMs > static_cast<float>(Times[Count - 1]))
+		{
+			const float Span = DurationMs - Times[Count - 1] + Times[0];
+			const float Alpha = Span > SMALL_NUMBER
+				? FMath::Clamp((TimeMs - Times[Count - 1]) / Span, 0.0f, 1.0f) : 1.0f;
+			return FQuat::Slerp(Values[Count - 1], Values[0], Alpha).GetNormalized();
+		}
+		return Values[Count - 1];
+	};
+
 	TArray<UAnimSequence*> Result;
+	int32 TotalRepairedAnimationKeys = 0;
 
 	if (!Skeleton || !Data.HasAnimationData())
 	{
@@ -595,34 +820,140 @@ TArray<UAnimSequence*> FWowSkeletalMeshBuilder::CreateAnimations(const FM2Data& 
 	const FReferenceSkeleton& RefSkel = Skeleton->GetReferenceSkeleton();
 	const int32 NumBones = RefSkel.GetNum();
 
+	// UE needs one root, so CreateSkeleton hangs every extra M2 root bone under the first
+	// root. In WoW those bones are independent: their keys must cancel the first root's
+	// animation, otherwise they follow it (centaur bodies drifting while idle, odd walks).
+	int32 PrimaryRootBone = INDEX_NONE;
+	TSet<int32> ExtraRootBones;
+	for (int32 BoneIndex = 0; BoneIndex < Data.Bones.Num(); ++BoneIndex)
+	{
+		const int32 Parent = Data.Bones[BoneIndex].ParentBone;
+		if (Parent >= 0 && Parent < Data.Bones.Num() && Parent != BoneIndex) continue;
+		if (PrimaryRootBone == INDEX_NONE) PrimaryRootBone = BoneIndex;
+		else ExtraRootBones.Add(BoneIndex);
+	}
+	auto PivotUE = [&Data](int32 BoneIndex)
+	{
+		const FVector& P = Data.Bones[BoneIndex].PivotPoint;
+		return FVector(P.Y * FWowCoordinate::SCALE, P.X * FWowCoordinate::SCALE, P.Z * FWowCoordinate::SCALE);
+	};
+
+	TSet<int32> ImportedIds;
+	// r482 (Stefan: mounts never stand still): one clip per animation id takes the variation the
+	// client plays most often, not simply the first one. RidingElekkElite's Stand 0-0 is a 10 %
+	// fidget (head and trunk swing) and 0-1 the 90 % calm stand; looping 0-0 kept the elekk moving.
+	TMap<int32, TPair<int32, int32>> MainVariant; // id -> (sub id, probability)
+	if (bFirstVariantOnly)
+		for (const FM2AnimSequence& Sequence : Data.Animations)
+		{
+			if (!Data.AnimationTracks.ContainsByPredicate([&Sequence](const FM2AnimationData& Clip)
+				{ return Clip.AnimationId == Sequence.AnimationId && Clip.SubAnimationId == Sequence.SubAnimationId
+					&& Clip.Duration > 0 && Clip.BoneTracks.Num() > 0; })) continue;
+			TPair<int32, int32>* Best = MainVariant.Find(Sequence.AnimationId);
+			if (!Best) MainVariant.Add(Sequence.AnimationId, TPair<int32, int32>(Sequence.SubAnimationId, Sequence.Probability));
+			else if (Sequence.Probability > Best->Value) *Best = TPair<int32, int32>(Sequence.SubAnimationId, Sequence.Probability);
+		}
 	for (const FM2AnimationData& AnimData : Data.AnimationTracks)
 	{
 		if (AnimData.Duration == 0 || AnimData.BoneTracks.Num() == 0)
 		{
 			continue;
 		}
+		if (AnimationIds && !AnimationIds->Contains(AnimData.AnimationId))
+		{
+			continue;
+		}
+
+        if (bFirstVariantOnly && ImportedIds.Contains(AnimData.AnimationId)) continue;
+        if (const TPair<int32, int32>* Main = bFirstVariantOnly ? MainVariant.Find(AnimData.AnimationId) : nullptr;
+            Main && Main->Key != AnimData.SubAnimationId) continue;
+        ImportedIds.Add(AnimData.AnimationId);
 
 		FString AnimName = FString::Printf(TEXT("%s_Anim%d_%d"), *ModelName, AnimData.AnimationId, AnimData.SubAnimationId);
 
-		UAnimSequence* AnimSeq = NewObject<UAnimSequence>();
+		UWowRuntimeAnimSequence* Runtime = WowUseRuntimeM2Import() ? NewObject<UWowRuntimeAnimSequence>() : nullptr;
+		UAnimSequence* AnimSeq = Runtime ? Runtime : NewObject<UAnimSequence>();
 		AnimSeq->SetSkeleton(Skeleton);
 
-		const float DurationSec = AnimData.Duration / 1000.0f;
+		// r461 (Stefan: "the grass on the tauren scene is pulsating"): bone tracks on a global
+		// sequence (grass sway 6.7-12 s, windmills, banners) were baked into the clip's own length
+		// (UI_Tauren Stand: 1 s), so every second the sway snapped back to its start. Static scenes
+		// and doodads now bake a looping clip long enough for the longest global sequence (a whole
+		// number of the clip's own length, at most 12 s), and each global track plays a whole
+		// number of its cycles in it (its speed changes slightly instead of jumping at the loop).
+		// Characters and creatures keep their clip lengths (gameplay timing).
+		uint32 MaxGlobal = 0;
+		for (const FM2BoneTrack& GlobalTrack : AnimData.BoneTracks)
+			MaxGlobal = FMath::Max3(MaxGlobal, FMath::Max(GlobalTrack.TransGlobalDuration, GlobalTrack.RotGlobalDuration),
+				GlobalTrack.ScaleGlobalDuration);
+		const bool bTimingModel = ModelName.StartsWith(TEXT("Character"), ESearchCase::IgnoreCase)
+			|| ModelName.StartsWith(TEXT("Creature"), ESearchCase::IgnoreCase)
+			|| ModelName.StartsWith(TEXT("HDX"), ESearchCase::IgnoreCase);
+		const bool bFitGlobals = AnimData.bIsLooping && MaxGlobal > 0 && !bTimingModel;
+		const float ClipMs = static_cast<float>(AnimData.Duration);
+		const float BakeMs = bFitGlobals && MaxGlobal > AnimData.Duration
+			? ClipMs * FMath::Max(1, FMath::CeilToInt32(FMath::Min(float(MaxGlobal), FMath::Max(12000.0f, ClipMs)) / ClipMs))
+			: ClipMs;
+		auto TrackMs = [&](float TimeMs, uint32 Global)
+		{
+			if (!Global) return BakeMs > ClipMs ? FMath::Fmod(TimeMs, ClipMs) : TimeMs;
+			if (!bFitGlobals) return FMath::Fmod(TimeMs, float(Global));
+			const float Period = BakeMs / FMath::Max(1.0f, FMath::RoundToFloat(BakeMs / Global));
+			return FMath::Fmod(TimeMs, Period) * float(Global) / Period;
+		};
+		const float DurationSec = BakeMs / 1000.0f;
 
+        const int32 NumFrames = FMath::Max(1, FMath::CeilToInt32(DurationSec * 30.0f));
+        if (Runtime) Runtime->InitializeRuntime(Skeleton, NumFrames);
 #if WITH_EDITOR
-		IAnimationDataController& Controller = AnimSeq->GetController();
-		Controller.InitializeModel();
-		Controller.OpenBracket(FText::FromString(TEXT("ImportM2Anim")));
-		Controller.SetFrameRate(FFrameRate(30, 1));
-
-		const int32 NumFrames = FMath::Max(1, FMath::CeilToInt32(DurationSec * 30.0f));
-		Controller.SetNumberOfFrames(NumFrames);
+        IAnimationDataController* Controller = Runtime ? nullptr : &AnimSeq->GetController();
+        if (Controller)
+        {
+            Controller->InitializeModel();
+            Controller->OpenBracket(FText::FromString(TEXT("ImportM2Anim")));
+            Controller->SetFrameRate(FFrameRate(30, 1));
+            Controller->SetNumberOfFrames(NumFrames);
+        }
+#endif
 
 		const int32 TrackCount = FMath::Min(AnimData.BoneTracks.Num(), NumBones);
+		// Component-space transform of the primary root per sample (for extra-root correction).
+		TArray<FTransform> PrimaryRootPose;
+		const bool bPrimaryRootAnimated = PrimaryRootBone != INDEX_NONE && !ExtraRootBones.IsEmpty()
+			&& AnimData.BoneTracks.IsValidIndex(PrimaryRootBone) && !AnimData.BoneTracks[PrimaryRootBone].IsEmpty();
+		if (bPrimaryRootAnimated)
+		{
+			const FM2BoneTrack& RootTrack = AnimData.BoneTracks[PrimaryRootBone];
+			const FVector RootPivot = PivotUE(PrimaryRootBone);
+			PrimaryRootPose.SetNum(NumFrames + 1);
+			for (int32 k = 0; k <= NumFrames; ++k)
+			{
+				const float TimeMs = AnimData.bIsLooping && k == NumFrames
+					? 0.0f : FMath::Min(BakeMs, k * (1000.0f / 30.0f));
+				FVector T = SampleVectorTrack(RootTrack.TransTimestamps, RootTrack.TransValues,
+					TrackMs(TimeMs, RootTrack.TransGlobalDuration),
+					RootTrack.TransGlobalDuration ? RootTrack.TransGlobalDuration : AnimData.Duration,
+					RootTrack.TransGlobalDuration != 0 || AnimData.bIsLooping, FVector::ZeroVector);
+				FQuat R = SampleRotationTrack(RootTrack.RotTimestamps, RootTrack.RotValues,
+					TrackMs(TimeMs, RootTrack.RotGlobalDuration),
+					RootTrack.RotGlobalDuration ? RootTrack.RotGlobalDuration : AnimData.Duration,
+					RootTrack.RotGlobalDuration != 0 || AnimData.bIsLooping, FQuat::Identity);
+				FVector S = SampleVectorTrack(RootTrack.ScaleTimestamps, RootTrack.ScaleValues,
+					TrackMs(TimeMs, RootTrack.ScaleGlobalDuration),
+					RootTrack.ScaleGlobalDuration ? RootTrack.ScaleGlobalDuration : AnimData.Duration,
+					RootTrack.ScaleGlobalDuration != 0 || AnimData.bIsLooping, FVector::OneVector);
+				if (T.ContainsNaN() || T.GetAbsMax() > 10000.0f) T = FVector::ZeroVector;
+				if (R.ContainsNaN() || R.SizeSquared() <= SMALL_NUMBER) R = FQuat::Identity; else R.Normalize();
+				if (S.ContainsNaN() || S.GetAbsMax() > 1000.0f || S.GetMin() <= KINDA_SMALL_NUMBER) S = FVector::OneVector;
+				PrimaryRootPose[k] = FTransform(FQuat(R.Y, R.X, R.Z, -R.W).GetNormalized(),
+					RootPivot + FVector(T.Y, T.X, T.Z) * FWowCoordinate::SCALE, S);
+			}
+		}
 		for (int32 BoneIdx = 0; BoneIdx < TrackCount; ++BoneIdx)
 		{
 			const FM2BoneTrack& Track = AnimData.BoneTracks[BoneIdx];
-			if (Track.IsEmpty())
+			const bool bCorrectExtraRoot = bPrimaryRootAnimated && ExtraRootBones.Contains(BoneIdx);
+			if (Track.IsEmpty() && !bCorrectExtraRoot)
 			{
 				continue;
 			}
@@ -630,76 +961,136 @@ TArray<UAnimSequence*> FWowSkeletalMeshBuilder::CreateAnimations(const FM2Data& 
 			FName BoneName = GetBoneName(BoneIdx);
 			const int32 RefBoneIndex = RefSkel.FindBoneIndex(BoneName);
 			const FTransform BaseTransform = RefBoneIndex != INDEX_NONE ? RefSkel.GetRefBonePose()[RefBoneIndex] : FTransform::Identity;
-			Controller.AddBoneCurve(BoneName);
-
-			int32 MaxKeys = FMath::Max3(
-				Track.TransTimestamps.Num(),
-				Track.RotTimestamps.Num(),
-				Track.ScaleTimestamps.Num()
-			);
-			if (MaxKeys == 0) MaxKeys = 1;
+			const FVector SafeBaseTranslation = BaseTransform.GetTranslation().ContainsNaN()
+				? FVector::ZeroVector : BaseTransform.GetTranslation();
+			FQuat SafeBaseRotation = BaseTransform.GetRotation();
+			if (SafeBaseRotation.ContainsNaN() || SafeBaseRotation.SizeSquared() <= SMALL_NUMBER)
+			{
+				SafeBaseRotation = FQuat::Identity;
+			}
+			else
+			{
+				SafeBaseRotation.Normalize();
+			}
+			const FVector SafeBaseScale = BaseTransform.GetScale3D().ContainsNaN()
+				? FVector::OneVector : BaseTransform.GetScale3D();
+#if WITH_EDITOR
+			if (Controller) Controller->AddBoneCurve(BoneName);
+#endif
 
 			TArray<FVector3f> PosKeys;
 			TArray<FQuat4f> RotKeys;
 			TArray<FVector3f> ScaleKeys;
-			PosKeys.SetNum(MaxKeys);
-			RotKeys.SetNum(MaxKeys);
-			ScaleKeys.SetNum(MaxKeys);
+			const int32 NumSampleKeys = NumFrames + 1;
+			PosKeys.SetNum(NumSampleKeys);
+			RotKeys.SetNum(NumSampleKeys);
+			ScaleKeys.SetNum(NumSampleKeys);
 
-			for (int32 k = 0; k < MaxKeys; ++k)
+			for (int32 k = 0; k < NumSampleKeys; ++k)
 			{
-				PosKeys[k] = FVector3f(BaseTransform.GetTranslation());
-				RotKeys[k] = FQuat4f(BaseTransform.GetRotation());
-				ScaleKeys[k] = FVector3f(BaseTransform.GetScale3D());
+				// UE stores NumFrames + 1 samples.  A looping clip's final sample
+				// must exactly equal its first sample, otherwise even a tiny M2
+				// endpoint difference becomes a visible hop at the loop boundary.
+				const float TimeMs = AnimData.bIsLooping && k == NumFrames
+					? 0.0f
+					: FMath::Min(BakeMs, k * (1000.0f / 30.0f));
+				FVector T = SampleVectorTrack(Track.TransTimestamps, Track.TransValues,
+					TrackMs(TimeMs, Track.TransGlobalDuration),
+                    Track.TransGlobalDuration ? Track.TransGlobalDuration : AnimData.Duration,
+                    Track.TransGlobalDuration != 0 || AnimData.bIsLooping, FVector::ZeroVector);
+				FQuat R = SampleRotationTrack(Track.RotTimestamps, Track.RotValues,
+					TrackMs(TimeMs, Track.RotGlobalDuration),
+                    Track.RotGlobalDuration ? Track.RotGlobalDuration : AnimData.Duration,
+                    Track.RotGlobalDuration != 0 || AnimData.bIsLooping, SafeBaseRotation);
+				FVector S = SampleVectorTrack(Track.ScaleTimestamps, Track.ScaleValues,
+					TrackMs(TimeMs, Track.ScaleGlobalDuration),
+                    Track.ScaleGlobalDuration ? Track.ScaleGlobalDuration : AnimData.Duration,
+                    Track.ScaleGlobalDuration != 0 || AnimData.bIsLooping, SafeBaseScale);
 
-				if (k < Track.TransValues.Num())
+				// Some WotLK tracks reference absent external .anim payloads or contain
+				// degenerate packed quaternions. Passing those values into UE animation
+				// compression creates NaN bone transforms every frame, forcing the
+				// engine to repair and log them continuously. Sanitize once here at the
+				// WoW-to-UE asset boundary instead of paying that cost during playback.
+				if (T.ContainsNaN() || T.GetAbsMax() > 10000.0f)
 				{
-					const FVector& T = Track.TransValues[k];
-					PosKeys[k] += FVector3f(T.Y * FWowCoordinate::SCALE, T.X * FWowCoordinate::SCALE, T.Z * FWowCoordinate::SCALE);
+					T = FVector::ZeroVector;
+					++TotalRepairedAnimationKeys;
 				}
-				else if (Track.TransValues.Num() > 0)
+				if (R.ContainsNaN() || R.SizeSquared() <= SMALL_NUMBER)
 				{
-					const FVector& T = Track.TransValues.Last();
-					PosKeys[k] += FVector3f(T.Y * FWowCoordinate::SCALE, T.X * FWowCoordinate::SCALE, T.Z * FWowCoordinate::SCALE);
+					R = SafeBaseRotation;
+					++TotalRepairedAnimationKeys;
+				}
+				else
+				{
+					R.Normalize();
+				}
+				if (S.ContainsNaN() || S.GetAbsMax() > 1000.0f)
+				{
+					S = SafeBaseScale;
+					++TotalRepairedAnimationKeys;
 				}
 
-				if (k < Track.RotValues.Num())
+				FVector ConvertedPosition = SafeBaseTranslation +
+					FVector(T.Y * FWowCoordinate::SCALE, T.X * FWowCoordinate::SCALE, T.Z * FWowCoordinate::SCALE);
+				if (ConvertedPosition.ContainsNaN())
 				{
-					const FQuat& R = Track.RotValues[k];
-					RotKeys[k] = FQuat4f(R.Y, R.X, R.Z, -R.W);
+					ConvertedPosition = SafeBaseTranslation;
+					++TotalRepairedAnimationKeys;
 				}
-				else if (Track.RotValues.Num() > 0)
+				PosKeys[k] = FVector3f(ConvertedPosition);
+				FQuat Converted(R.Y, R.X, R.Z, -R.W);
+				if (Converted.ContainsNaN() || Converted.SizeSquared() <= SMALL_NUMBER)
 				{
-					const FQuat& R = Track.RotValues.Last();
-					RotKeys[k] = FQuat4f(R.Y, R.X, R.Z, -R.W);
+					Converted = FQuat(SafeBaseRotation.Y, SafeBaseRotation.X,
+						SafeBaseRotation.Z, -SafeBaseRotation.W);
+					++TotalRepairedAnimationKeys;
 				}
-
-				if (k < Track.ScaleValues.Num())
+				Converted.Normalize();
+				RotKeys[k] = FQuat4f(Converted);
+				ScaleKeys[k] = FVector3f(S);
+				if (bCorrectExtraRoot && PrimaryRootPose.IsValidIndex(k))
 				{
-					const FVector& S = Track.ScaleValues[k];
-					ScaleKeys[k] = FVector3f(S.X, S.Y, S.Z);
-				}
-				else if (Track.ScaleValues.Num() > 0)
-				{
-					const FVector& S = Track.ScaleValues.Last();
-					ScaleKeys[k] = FVector3f(S.X, S.Y, S.Z);
+					// Desired component-space pose of this independent root, expressed
+					// relative to the (animated) primary root it is attached to in UE.
+					const FTransform Desired(Converted,
+						PivotUE(BoneIdx) + FVector(T.Y, T.X, T.Z) * FWowCoordinate::SCALE, S);
+					const FTransform Local = Desired.GetRelativeTransform(PrimaryRootPose[k]);
+					if (!Local.ContainsNaN())
+					{
+						PosKeys[k] = FVector3f(Local.GetTranslation());
+						RotKeys[k] = FQuat4f(Local.GetRotation().GetNormalized());
+						ScaleKeys[k] = FVector3f(Local.GetScale3D());
+					}
 				}
 			}
 
-			Controller.SetBoneTrackKeys(BoneName, PosKeys, RotKeys, ScaleKeys);
-		}
+            if (Runtime) Runtime->SetRuntimeTrack(RefBoneIndex, MoveTemp(PosKeys), MoveTemp(RotKeys), MoveTemp(ScaleKeys));
+#if WITH_EDITOR
+            else if (Controller) Controller->SetBoneTrackKeys(BoneName, PosKeys, RotKeys, ScaleKeys);
+#endif
+        }
+#if WITH_EDITOR
+        if (Controller) { Controller->CloseBracket(); Controller->NotifyPopulated(); }
+#endif
 
-		Controller.CloseBracket();
-		Controller.NotifyPopulated();
-#else
-		UE_LOG(LogWowSkelMesh, Warning, TEXT("  Skipping animation '%s' — GetController() requires editor"), *AnimName);
-#endif // WITH_EDITOR
 		Result.Add(AnimSeq);
+		if (OutAnimationIds)
+		{
+			OutAnimationIds->Add(AnimData.AnimationId);
+		}
 
 		UE_LOG(LogWowSkelMesh, Log, TEXT("  Created animation '%s' (%.2fs, %s)"),
 			*AnimName, DurationSec, AnimData.bIsLooping ? TEXT("loop") : TEXT("once"));
 	}
 
 	UE_LOG(LogWowSkelMesh, Log, TEXT("Created %d animations for '%s'"), Result.Num(), *ModelName);
+	if (TotalRepairedAnimationKeys > 0)
+	{
+		UE_LOG(LogWowSkelMesh, Warning,
+			TEXT("Repaired %d invalid animation key samples for '%s' during import"),
+			TotalRepairedAnimationKeys, *ModelName);
+	}
 	return Result;
 }

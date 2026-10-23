@@ -1,4 +1,6 @@
 #include "Widgets/SWowTradeWindow.h"
+#include "WowColor.h"
+#include "WowWindowStyle.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
@@ -15,9 +17,7 @@ void SWowTradeWindow::Construct(const FArguments& InArgs)
 
     ChildSlot
     [
-        SNew(SBorder)
-        .BorderBackgroundColor(FLinearColor(0.09f, 0.08f, 0.06f, 0.95f))
-        .BorderImage(FCoreStyle::Get().GetBrush("Border"))
+        SNew(SWowWindowFrame)
         .Padding(8.0f)
         [
             SNew(SVerticalBox)
@@ -31,13 +31,13 @@ void SWowTradeWindow::Construct(const FArguments& InArgs)
                 [
                     SNew(STextBlock)
                     .Text(FText::FromString(TEXT("Trade")))
-                    .Font(FCoreStyle::GetDefaultFontStyle("Bold", 14))
+                    .Font(FWowWindowStyle::TitleFont())
                     .ColorAndOpacity(FLinearColor::Yellow)
                 ]
                 + SHorizontalBox::Slot()
                 .AutoWidth()
                 [
-                    SNew(SButton)
+                    SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .Text(FText::FromString(TEXT("Cancel")))
                     .OnClicked(this, &SWowTradeWindow::OnCancelClicked)
                 ]
@@ -64,7 +64,7 @@ void SWowTradeWindow::Construct(const FArguments& InArgs)
                 .Padding(0.0f, 0.0f, 6.0f, 0.0f)
                 [
                     SNew(SBorder)
-                    .BorderBackgroundColor(FLinearColor(0.15f, 0.12f, 0.10f, 0.9f))
+                    .BorderBackgroundColor(WowColor::FromWow(0.15f, 0.12f, 0.10f, 0.9f))
                     .Padding(6.0f)
                     [
                         SNew(SVerticalBox)
@@ -98,7 +98,7 @@ void SWowTradeWindow::Construct(const FArguments& InArgs)
                 .Padding(6.0f, 0.0f, 0.0f, 0.0f)
                 [
                     SNew(SBorder)
-                    .BorderBackgroundColor(FLinearColor(0.15f, 0.12f, 0.10f, 0.9f))
+                    .BorderBackgroundColor(WowColor::FromWow(0.15f, 0.12f, 0.10f, 0.9f))
                     .Padding(6.0f)
                     [
                         SNew(SVerticalBox)
@@ -133,7 +133,7 @@ void SWowTradeWindow::Construct(const FArguments& InArgs)
             .Padding(0.0f, 8.0f, 0.0f, 0.0f)
             .HAlign(HAlign_Right)
             [
-                SNew(SButton)
+                SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                 .Text(this, &SWowTradeWindow::GetAcceptButtonText)
                 .OnClicked(this, &SWowTradeWindow::OnAcceptClicked)
             ]
@@ -225,7 +225,7 @@ void SWowTradeWindow::RefreshTradeLists()
         [
             SNew(STextBlock)
             .Text(FText::FromString(PlayerLabel))
-            .ColorAndOpacity((PlayerItem && PlayerItem->HasItem()) ? FLinearColor::White : FLinearColor(0.6f, 0.6f, 0.6f))
+            .ColorAndOpacity((PlayerItem && PlayerItem->HasItem()) ? FLinearColor::White : WowColor::FromWow(0.6f, 0.6f, 0.6f))
         ];
 
         TargetItemsBox->AddSlot()
@@ -234,7 +234,7 @@ void SWowTradeWindow::RefreshTradeLists()
         [
             SNew(STextBlock)
             .Text(FText::FromString(TargetLabel))
-            .ColorAndOpacity((TargetItem && TargetItem->HasItem()) ? FLinearColor::White : FLinearColor(0.6f, 0.6f, 0.6f))
+            .ColorAndOpacity((TargetItem && TargetItem->HasItem()) ? FLinearColor::White : WowColor::FromWow(0.6f, 0.6f, 0.6f))
         ];
     }
 

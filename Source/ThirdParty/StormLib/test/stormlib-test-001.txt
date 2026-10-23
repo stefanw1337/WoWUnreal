@@ -1,7 +1,5 @@
 ==== Test Suite for StormLib version 9.31 ====
 InitWorkFolder: Work directory \Multimedia\MPQs (default)
-units/Orc/HealingWard/Rune2.blp
-TestUseAfterFree (Test-UAF.mpq) succeeded.
 TestLiFiSearch (FLAT-MAP:listfile-test.txt) succeeded.
 TestLiFiSearch (listfile-test.txt) succeeded.
 TestFileStream (MPQ_2013_v4_alternate-original.MPQ) succeeded.
@@ -16,6 +14,8 @@ TestFileMirror (part-file://MPQ_2009_v1_patch-complete.MPQ.part) succeeded.
 TestFileMirror (MPQ_2013_v4_alternate-created.MPQ) succeeded.
 TestFileMirror (MPQ_2013_v4_alternate-incomplete.MPQ) succeeded.
 TestFileMirror (MPQ_2013_v4_alternate-complete.MPQ) succeeded.
+TestEmbeddedMpq (MPQ_1997_v1_Diablo1_DIABDAT.MPQ) succeeded.
+TestEmbeddedMpq (MPQ_2001_v1_War3.mpq) succeeded.
 TestReadingMpq: Warning: CRC32 error on replay.game.events
 TestReadingMpq (pocs/MPQ_2024_01_HeapOverrun.mpq) succeeded.
 TestReadingMpq (pocs/MPQ_2024_02_StackOverflow.mpq) succeeded.
@@ -106,6 +106,7 @@ TestReadingMpq (MPQ_2023_v1_Lusin2Rpg1.28.w3x) succeeded.
 TestReadingMpq (MPQ_2024_v1_300TK2.09p.w3x) succeeded.
 TestReadingMpq (MPQ_2025_v1_Legion_TD_11_2d-BETA_2_TeamOZE.w3x) succeeded.
 TestReadingMpq (MPQ_2026_v1_The Art of Defense v4.11 G0A.w3x) succeeded.
+TestReadingMpq (MPQ_2026_v1_BadTablesSize.scx) succeeded.
 TestReadingMpq (mix-mpq/AHF04patch.mix) succeeded.
 TestReadingMpq (mix-mpq/hs0.1.asi) succeeded.
 TestReadingMpq (mix-mpq/hs0.8.asi) succeeded.

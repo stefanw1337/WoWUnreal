@@ -70,11 +70,32 @@ struct WOWDATA_API FWowCoordinate
         return FVector(MAP_ORIGIN - NgZ, MAP_ORIGIN - NgX, NgY);
     }
 
+    /** Convert a WoW world-facing angle (radians) to an Unreal yaw (degrees). */
+    static float WowOrientationToUEYaw(float OrientationRadians)
+    {
+        return FRotator::NormalizeAxis(-FMath::RadiansToDegrees(OrientationRadians));
+    }
+
+    /** Convert an Unreal yaw (degrees) to a normalized WoW world-facing angle (radians). */
+    static float UEYawToWowOrientation(float YawDegrees)
+    {
+        return FMath::UnwindRadians(-FMath::DegreesToRadians(YawDegrees));
+    }
+
+    /** Return the Unreal yaw matching a direction expressed in WoW world coordinates. */
+    static float WowDirectionToUEYaw(const FVector& WowDirection)
+    {
+        const FVector UEDirection(WowDirection.X, -WowDirection.Y, 0.0f);
+        return UEDirection.IsNearlyZero() ? 0.0f : UEDirection.Rotation().Yaw;
+    }
+
     /**
      * Convert WoW MODF/MDDF Euler rotation to UE quaternion.
      *
      * Pipeline: build rotation in ADT space using noggit3's from_model_rotation
      * (-RZ, RY-90, RX) applied in YZX order, then convert from ADT to UE axes.
+     * Noggit uses clockwise X/Z and counterclockwise Y axis matrices. In a
+     * standard Hamilton quaternion that means angles (RZ, RY-90, -RX).
      *
      * ADT axes → UE axes: X(east)→Y, Y(up)→Z, Z(south)→-X
      * Quaternion conversion: Q_ue = (-Q_adt.Z, Q_adt.X, Q_adt.Y, -Q_adt.W)
@@ -85,10 +106,11 @@ struct WOWDATA_API FWowCoordinate
     static FQuat WowRotationToUEQuat(float RX, float RY, float RZ)
     {
         // Step 1: Build rotation quaternion in ADT space (right-handed, X=east, Y=up, Z=south)
-        // from_model_rotation: (-RZ, RY-90, RX) applied in YZX order
+        // Convert the source clockwise pitch/roll to Hamilton angles, YZX order.
+        // Yaw-only objects were correct; tilted waterfalls/rocks leaned backwards.
         const float HalfYaw   = FMath::DegreesToRadians(RY - 90.0f) * 0.5f;  // around ADT Y (up)
-        const float HalfPitch = FMath::DegreesToRadians(RX) * 0.5f;           // around ADT Z (south)
-        const float HalfRoll  = FMath::DegreesToRadians(-RZ) * 0.5f;          // around ADT X (east)
+        const float HalfPitch = FMath::DegreesToRadians(-RX) * 0.5f;           // around ADT Z (south)
+        const float HalfRoll  = FMath::DegreesToRadians(RZ) * 0.5f;          // around ADT X (east)
 
         // Individual quaternions in ADT space: Qaxis(angle) = (sin*nx, sin*ny, sin*nz, cos)
         const FQuat Qy(0, FMath::Sin(HalfYaw), 0, FMath::Cos(HalfYaw));

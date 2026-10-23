@@ -5,6 +5,7 @@ class FMpqManager;
 class FWowAssetCache;
 class USkeletalMeshComponent;
 class AActor;
+class USceneComponent;
 struct FM2Data;
 
 /**
@@ -15,18 +16,27 @@ struct FM2Data;
 class WOWASSETS_API FWowEquipmentManager
 {
 public:
-    /** Well-known attachment point IDs from M2 format (wowdev.wiki/M2#Attachments)
-     *  0=MountPoint/LeftWrist, 1=RightPalm, 2=LeftPalm, 5=RShoulder, 6=LShoulder,
-     *  11=Helmet, 12=Back, 26=RightBackSheath */
+    static void PrepareStandaloneMaterials();
+    /** Reload ItemVisuals/ItemVisualEffects/enchantment rows on next use (after switching the game-data folder). */
+    static void ClearCaches();
+    /** Well-known Wrath character M2 attachment point IDs. */
     enum class EAttachmentPoint : uint32
     {
+        ShieldHand = 0,
         RightHand = 1,       // RIGHT_PALM — main-hand weapon grip
         LeftHand = 2,        // LEFT_PALM — off-hand weapon grip
         RightShoulder = 5,
         LeftShoulder = 6,
         Helmet = 11,
         Back = 12,           // BACK — cape/cloak attachment
-        Shield = 26          // RIGHT_BACK_SHEATH — shield sheathed on back
+        MainHandSheath = 26,
+        OffHandSheath = 27,
+        ShieldSheath = 28,
+        LargeWeaponLeft = 30,
+        LargeWeaponRight = 31,
+        HipWeaponLeft = 32,
+        HipWeaponRight = 33,
+        Shield = ShieldSheath // Backward-compatible model-viewer alias.
     };
 
     /**
@@ -40,8 +50,24 @@ public:
      */
     static USceneComponent* AttachEquipment(FMpqManager* Mpq, FWowAssetCache* Cache,
         uint32 ItemDisplayId, EAttachmentPoint AttachPoint,
-        USkeletalMeshComponent* CharacterMesh, const FM2Data& CharacterM2);
+        USkeletalMeshComponent* CharacterMesh, const FM2Data& CharacterM2, uint32 EnchantmentVisualId = 0);
 
+    /** r398: attach an item model (ItemDisplayInfo id) to an existing socket of the built character
+        mesh, e.g. "WowSheathHipWeaponLeft". Same model, textures and particles as AttachEquipment. */
+    static USceneComponent* AttachItemToSocket(FMpqManager* Mpq, FWowAssetCache* Cache,
+        uint32 ItemDisplayId, USkeletalMeshComponent* CharacterMesh, FName Socket);
+
+    static void ApplyDrawnTransform(class UStaticMeshComponent* Equipment);
+    static void ApplySheathedTransform(class UStaticMeshComponent* Equipment, USkeletalMeshComponent* CharacterMesh);
+    static void UpdateEquipmentEnchantment(FMpqManager* Mpq, FWowAssetCache* Cache, USceneComponent* Equipment, uint32 VisualId);
+    static uint32 ResolveEnchantmentVisual(FMpqManager* Mpq, uint32 PackedEnchantments);
+    static void RestoreEquipmentEffects(FMpqManager* Mpq, FWowAssetCache* Cache, USceneComponent* Equipment);
+
+private:
+    static USceneComponent* AttachEquipmentImpl(FMpqManager* Mpq, FWowAssetCache* Cache,
+        uint32 ItemDisplayId, EAttachmentPoint AttachPoint, USkeletalMeshComponent* CharacterMesh,
+        const FM2Data* CharacterM2, FName ForcedSocket, uint32 EnchantmentVisualId);
+public:
     /** Get the bone name for a given attachment point from M2 data */
     static FName GetAttachmentBoneName(const FM2Data& M2Data, EAttachmentPoint AttachPoint);
 

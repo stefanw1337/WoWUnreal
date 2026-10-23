@@ -70,6 +70,7 @@ void UWowAutoLogin::TryAutoLogin()
         }
     }
 
+    Cred.Password = UWowCredentialStore::ResolvePassword(Cred);
     if (Cred.Username.IsEmpty() || Cred.Password.IsEmpty())
     {
         UE_LOG(LogWowAutoLogin, Error, TEXT("Credential '%s' has empty username or password"), *Cred.Alias);

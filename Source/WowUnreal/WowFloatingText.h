@@ -1,7 +1,9 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
-#include "Components/TextRenderComponent.h"
+#include "Styling/SlateTypes.h"
+class UWidgetComponent;
+class STextBlock;
 #include "WowFloatingText.generated.h"
 
 USTRUCT(BlueprintType)
@@ -23,6 +25,14 @@ struct WOWUNREAL_API FWowFloatingTextInfo
 
     UPROPERTY(BlueprintReadWrite)
     float FontSize = 24.0f;
+
+    /** Shown around the number ("+", " Mana"); Text itself stays the bare number so it can be summed (r279). */
+    FString Prefix;
+    FString Suffix;
+    /** Incoming (heals and resources you receive): float down into the unit instead of up. */
+    bool bDownward = false;
+    /** World option that turns on summing for this kind of number. */
+    FString SumOption = TEXT("combattextsum");
 };
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
@@ -49,7 +59,16 @@ public:
 
 private:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, meta = (AllowPrivateAccess = "true"))
-    TObjectPtr<UTextRenderComponent> TextRenderComponent;
+    TObjectPtr<UWidgetComponent> TextWidgetComponent;
+    TSharedPtr<STextBlock> CombatText;
+    FSlateFontInfo CombatFont;
+    int32 BaseFontSize = 24;
+    TWeakObjectPtr<AActor> DamageTarget;
+    float ScreenStackOffset = 0.0f;
+    float ScreenSideOffset = 0.0f;
+    int64 NumericAmount = 0;
+    bool bCriticalNumber = false;
+    bool bDownward = false;
 
     bool bIsFloating = false;
     float FloatTimer = 0.0f;

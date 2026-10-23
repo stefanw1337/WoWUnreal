@@ -17,10 +17,12 @@ bool FTalentTabDbc::Load(const FDbcParser& Parser)
 	{
 		FTalentTabDbcEntry E;
 		E.TalentTabID = Parser.GetUInt(i, 0);
-		E.Name = Parser.GetString(i, 1);
+		E.Name = Parser.GetLocalizedString(i, 1);
 		// Skip columns 2-17 (Name localized)
-		E.NameFlags = Parser.GetUInt(i, 18);
-		E.SpellIcon = Parser.GetUInt(i, 19);
+		// 3.3.5 layout: 1-17 Name_lang (16 locales + flags), 18 SpellIconID, 19 RaceMask,
+		// 20 ClassMask, 21 PetTalentMask, 22 OrderIndex, 23 BackgroundFile.
+		E.NameFlags = Parser.GetUInt(i, 17);
+		E.SpellIcon = Parser.GetUInt(i, 18);
 		E.ClassMask = Parser.GetUInt(i, 20);
 		E.PetTalentMask = Parser.GetUInt(i, 21);
 		E.TabPage = Parser.GetUInt(i, 22);

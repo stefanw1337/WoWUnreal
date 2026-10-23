@@ -10,6 +10,7 @@ public:
     uint32 GetUInt(uint32 Record, uint32 Field) const;
     float GetFloat(uint32 Record, uint32 Field) const;
     FString GetString(uint32 Record, uint32 Field) const;
+    FString GetLocalizedString(uint32 Record, uint32 FirstField) const;
     bool IsValid() const { return bIsValid; }
 private:
     uint32 RecordCount=0, FieldCount=0, RecordSize=0, StringBlockSize=0;

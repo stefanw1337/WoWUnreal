@@ -1,4 +1,5 @@
 #include "SWowTaxiMap.h"
+#include "WowWindowStyle.h"
 #include "WowConnectionManager.h"
 #include "WowOpcodes.h"
 #include "Widgets/SBoxPanel.h"
@@ -19,7 +20,7 @@ void SWowTaxiMap::Construct(const FArguments& InArgs)
 
     ChildSlot
     [
-        SAssignNew(Background, SBorder)
+        SAssignNew(Background, SWowWindowFrame)
         .BorderImage(FAppStyle::GetBrush("WhiteBrush"))
         .BorderBackgroundColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.9f))
         .Visibility(EVisibility::Collapsed)
@@ -41,7 +42,7 @@ void SWowTaxiMap::Construct(const FArguments& InArgs)
                 + SHorizontalBox::Slot()
                 .AutoWidth()
                 [
-                    SAssignNew(CloseButton, SButton)
+                    SAssignNew(CloseButton, SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .Text(FText::FromString(TEXT("Close")))
                     .OnClicked(this, &SWowTaxiMap::OnCloseClicked)
                 ]

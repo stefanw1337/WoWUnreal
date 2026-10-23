@@ -6,24 +6,46 @@ public class WowData : ModuleRules
     public WowData(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject" });
 
-        string StormLibPath = Path.Combine(ModuleDirectory, "..", "ThirdParty", "StormLib", "src");
-        string StormLibBuild = Path.Combine(ModuleDirectory, "..", "ThirdParty", "StormLib", "build");
-
-        if (Directory.Exists(StormLibPath))
-        {
-            PublicIncludePaths.Add(StormLibPath);
-            PublicDefinitions.Add("STORMLIB_NO_AUTO_LINK=1");
-
-            // Link pre-built StormLib static library
-            string LibPath = Path.Combine(StormLibBuild, "libstorm.a");
-            if (File.Exists(LibPath))
+        PublicDependencyModuleNames.AddRange(
+            new string[]
             {
-                PublicAdditionalLibraries.Add(LibPath);
-                // StormLib depends on zlib and bzip2
-                PublicAdditionalLibraries.Add("bz2");
-                PublicAdditionalLibraries.Add("z");
+                "Core",
+                "CoreUObject"
+            }
+        );
+
+        string StormLibRoot = Path.Combine(
+            ModuleDirectory,
+            "..",
+            "ThirdParty",
+            "StormLib"
+        );
+
+        string StormLibSource = Path.Combine(
+            StormLibRoot,
+            "src"
+        );
+
+        if (Directory.Exists(StormLibSource))
+        {
+            PublicIncludePaths.Add(StormLibSource);
+
+            // Prevent StormLib.h from auto-linking StormLibRUD.lib.
+            PublicDefinitions.Add("__STORMLIB_NO_STATIC_LINK__=1");
+
+            if (Target.Platform == UnrealTargetPlatform.Win64)
+            {
+                string StormLibLibrary = Path.Combine(
+                    StormLibRoot,
+                    "bin",
+                    "StormLib",
+                    "x64",
+                    "ReleaseAD",
+                    "StormLibRAD.lib"
+                );
+
+                PublicAdditionalLibraries.Add(StormLibLibrary);
             }
         }
     }

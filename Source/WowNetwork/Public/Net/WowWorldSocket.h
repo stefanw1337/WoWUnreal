@@ -1,11 +1,13 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "HAL/Runnable.h"
+#include "HAL/ThreadSafeBool.h"
 #include "Crypto/WowAuthCrypt.h"
 
 struct FWowCharacterInfo;
 
 DECLARE_DELEGATE_OneParam(FOnWorldAuthResult, bool);
+DECLARE_DELEGATE_OneParam(FOnWorldDisconnected, const FString&);
 DECLARE_DELEGATE_OneParam(FOnCharacterListReceived, const TArray<FWowCharacterInfo>&);
 DECLARE_DELEGATE_TwoParams(FOnWorldPacket, uint16 /*Opcode*/, const TArray<uint8>& /*Data*/);
 
@@ -14,6 +16,9 @@ class WOWNETWORK_API FWowWorldSocket : public FRunnable
 public:
     FWowWorldSocket();
     virtual ~FWowWorldSocket();
+
+    /** r378: the account's expansion level from the last AUTH_OK (0 Classic, 1 TBC, 2 Wrath; -1 unknown). */
+    static int32 GetLastAccountExpansion();
 
     bool Connect(const FString& Host, int32 Port, const FString& AccountName, const TArray<uint8>& SessionKey, uint32 RealmId);
     void Disconnect();
@@ -39,6 +44,8 @@ public:
     virtual uint32 Run() override;
     virtual void Stop() override;
 
+    int32 GetLatencyMs() const;
+    FOnWorldDisconnected OnDisconnected;
     FOnWorldAuthResult OnAuthResult;
     FOnCharacterListReceived OnCharacterList;
     FOnWorldPacket OnPacket;
@@ -48,6 +55,8 @@ private:
     void HandleAuthResponse(const TArray<uint8>& Data);
     void HandleCharEnum(const TArray<uint8>& Data);
 
+    void FailConnection(const FString& Reason);
+    bool UpdateHeartbeat();
     bool SendRawBytes(const uint8* Data, int32 Len);
     bool RecvExact(uint8* Buffer, int32 Len);
 
@@ -59,11 +68,18 @@ private:
     TArray<uint8> SessionKey;
     uint32 RealmId = 1;
 
-    bool bRunning = false;
+    TSharedRef<FThreadSafeBool, ESPMode::ThreadSafe> CallbackActive = MakeShared<FThreadSafeBool, ESPMode::ThreadSafe>(true);
+    FThreadSafeBool bRunning = false;
+    bool bAuthenticated = false;
+    double ConnectedAt = 0.0;
+    double LastPingAt = 0.0;
+    uint32 PingSequence = 0;
+    TAtomic<double> PendingPingAt{0.0};
+    TAtomic<int32> LatencyMs{0};
     bool bEncrypted = false;
 
     // Thread-safe send queue
-    TQueue<TArray<uint8>> SendQueue;
+    TQueue<TArray<uint8>, EQueueMode::Mpsc> SendQueue;
 
-    FCriticalSection SocketLock;
+    // Socket and cipher are worker-owned until Disconnect has joined the thread.
 };

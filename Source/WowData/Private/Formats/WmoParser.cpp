@@ -10,9 +10,14 @@ static constexpr uint32 WMO_MOTX = MakeFourCC('X','T','O','M');
 static constexpr uint32 WMO_MOMT = MakeFourCC('T','M','O','M');
 static constexpr uint32 WMO_MOGN = MakeFourCC('N','G','O','M');
 static constexpr uint32 WMO_MOGI = MakeFourCC('I','G','O','M');
+static constexpr uint32 WMO_MOPV = MakeFourCC('V','P','O','M');
+static constexpr uint32 WMO_MOPT = MakeFourCC('T','P','O','M');
+static constexpr uint32 WMO_MOPR = MakeFourCC('R','P','O','M');
+static constexpr uint32 WMO_MOLT = MakeFourCC('T','L','O','M');
 static constexpr uint32 WMO_MODS = MakeFourCC('S','D','O','M');
 static constexpr uint32 WMO_MODN = MakeFourCC('N','D','O','M');
 static constexpr uint32 WMO_MODD = MakeFourCC('D','D','O','M');
+static constexpr uint32 WMO_MFOG = MakeFourCC('G','O','F','M'); // r654
 
 // Group chunks — REVERSED order, as stored on disk (little-endian uint32 read)
 static constexpr uint32 WMO_MOGP = MakeFourCC('P','G','O','M');
@@ -24,6 +29,7 @@ static constexpr uint32 WMO_MOTV = MakeFourCC('V','T','O','M');
 static constexpr uint32 WMO_MOBA = MakeFourCC('A','B','O','M');
 static constexpr uint32 WMO_MOCV = MakeFourCC('V','C','O','M');
 static constexpr uint32 WMO_MLIQ = MakeFourCC('Q','I','L','M');
+static constexpr uint32 WMO_MODR = MakeFourCC('R','D','O','M');
 
 namespace
 {
@@ -115,6 +121,19 @@ namespace
             if (Pos < TableSize) Pos++; // skip the null terminator
         }
     }
+
+    FString ReadFixedCString(const uint8* Base, uint32 Offset, uint32 MaxLen)
+    {
+        uint32 Len = 0;
+        while (Len < MaxLen && Base[Offset + Len] != 0)
+        {
+            ++Len;
+        }
+
+        return Len > 0
+            ? FString(Len, reinterpret_cast<const char*>(Base + Offset))
+            : FString();
+    }
 }
 
 // ============================================================================
@@ -139,6 +158,8 @@ FWmoRootData FWmoParser::ParseRoot(const TArray<uint8>& Data)
     // Doodad name string table (populated from MODN chunk)
     const uint8* DoodNameTable = nullptr;
     uint32 DoodNameTableSize = 0;
+    uint32 ExpectedLightCount = 0;
+    TArray<FVector> PortalVertices; // r539: MOPV
 
     // Iterate chunks
     uint32 Offset = 0;
@@ -168,7 +189,7 @@ FWmoRootData FWmoParser::ParseRoot(const TArray<uint8>& Data)
             const uint32 nMaterials  = ReadU32(Base, Off, DataSize);
             const uint32 nGroups     = ReadU32(Base, Off, DataSize);
             /*nPortals*/               ReadU32(Base, Off, DataSize);
-            /*nLights*/                ReadU32(Base, Off, DataSize);
+            ExpectedLightCount       = ReadU32(Base, Off, DataSize);
             /*nModels*/                ReadU32(Base, Off, DataSize);
             /*nDoodads*/               ReadU32(Base, Off, DataSize);
             /*nSets*/                  ReadU32(Base, Off, DataSize);
@@ -256,6 +277,93 @@ FWmoRootData FWmoParser::ParseRoot(const TArray<uint8>& Data)
                 Result.Materials.Add(MoveTemp(Mat));
             }
         }
+        else if (ChunkMagic == WMO_MOPV)
+        {
+            // r539: portal polygons, raw WMO coordinates (comes before MOPT in the file).
+            uint32 Off=ChunkStart;
+            for (uint32 I=0;I<ChunkSize/12;++I)
+            {
+                const float X=ReadFloat(Base,Off,DataSize);
+                const float Y=ReadFloat(Base,Off,DataSize);
+                const float Z=ReadFloat(Base,Off,DataSize);
+                PortalVertices.Add(FVector(X,Y,Z));
+            }
+        }
+        else if (ChunkMagic == WMO_MOPT)
+        {
+            uint32 Off=ChunkStart;
+            for (uint32 I=0;I<ChunkSize/20;++I)
+            {
+                // r539: the vertex range (MOPV) for portal culling.
+                const uint16 FirstVertex=ReadU16(Base,Off,DataSize);
+                const uint16 VertexCount=ReadU16(Base,Off,DataSize);
+                FWmoRootData::FPortal Portal;
+                for (uint32 V=FirstVertex;V<uint32(FirstVertex)+VertexCount && V<uint32(PortalVertices.Num());++V)
+                    Portal.Vertices.Add(PortalVertices[V]);
+                Portal.Normal.X=ReadFloat(Base,Off,DataSize);
+                Portal.Normal.Y=ReadFloat(Base,Off,DataSize);
+                Portal.Normal.Z=ReadFloat(Base,Off,DataSize);
+                Portal.Distance=ReadFloat(Base,Off,DataSize);
+                Result.Portals.Add(Portal);
+            }
+        }
+        else if (ChunkMagic == WMO_MOPR)
+        {
+            uint32 Off=ChunkStart;
+            for (uint32 I=0;I<ChunkSize/8;++I)
+            {
+                FWmoRootData::FPortalReference Ref;
+                Ref.Portal=ReadU16(Base,Off,DataSize);
+                Ref.Group=ReadU16(Base,Off,DataSize);
+                Ref.Side=ReadI16(Base,Off,DataSize);
+                Off+=2;
+                Result.PortalReferences.Add(Ref);
+            }
+        }
+        else if (ChunkMagic == WMO_MOLT)
+        {
+            // Lights: fixed 48-byte records. These are WMO-local authored light
+            // sources used by buildings and interiors.
+            constexpr uint32 LightRecordSize = 48;
+            const uint32 NumLights = ChunkSize / LightRecordSize;
+            Result.Lights.Reserve(NumLights);
+
+            uint32 Off = ChunkStart;
+            for (uint32 i = 0; i < NumLights; ++i)
+            {
+                FWmoLight Light;
+                Light.Type = ReadU8(Base, Off, DataSize);
+                Light.bUseAttenuation = ReadU8(Base, Off, DataSize) != 0;
+                /*padding*/ ReadU8(Base, Off, DataSize);
+                /*padding*/ ReadU8(Base, Off, DataSize);
+
+                const uint8 B = ReadU8(Base, Off, DataSize);
+                const uint8 G = ReadU8(Base, Off, DataSize);
+                const uint8 R = ReadU8(Base, Off, DataSize);
+                const uint8 A = ReadU8(Base, Off, DataSize);
+                Light.Color = FColor(R, G, B, A);
+
+                const float PosX = ReadFloat(Base, Off, DataSize);
+                const float PosY = ReadFloat(Base, Off, DataSize);
+                const float PosZ = ReadFloat(Base, Off, DataSize);
+                Light.Position = FVector(PosX, PosY, PosZ);
+
+                Light.Intensity = ReadFloat(Base, Off, DataSize);
+                Light.AttenuationStart = ReadFloat(Base, Off, DataSize);
+                Light.AttenuationEnd = ReadFloat(Base, Off, DataSize);
+                Light.Unknown0 = ReadFloat(Base, Off, DataSize);
+                Light.Unknown1 = ReadFloat(Base, Off, DataSize);
+                Light.Unknown2 = ReadFloat(Base, Off, DataSize);
+                Light.Unknown3 = ReadFloat(Base, Off, DataSize);
+
+                Result.Lights.Add(MoveTemp(Light));
+            }
+
+            if (ChunkSize % LightRecordSize != 0)
+            {
+                UE_LOG(LogWmo, Warning, TEXT("MOLT chunk has %u trailing bytes"), ChunkSize % LightRecordSize);
+            }
+        }
         else if (ChunkMagic == WMO_MODN)
         {
             // Doodad name string table
@@ -268,7 +376,97 @@ FWmoRootData FWmoParser::ParseRoot(const TArray<uint8>& Data)
             Result.DoodadPaths.Reserve(AllStrings.Num());
             for (auto& Pair : AllStrings)
             {
+                Result.DoodadPathByOffset.Add(Pair.Key, Pair.Value);
                 Result.DoodadPaths.Add(MoveTemp(Pair.Value));
+            }
+        }
+        else if (ChunkMagic == WMO_MODS)
+        {
+            // Doodad sets: fixed 32-byte records.
+            const uint32 NumSets = ChunkSize / 32;
+            Result.DoodadSets.Reserve(NumSets);
+
+            uint32 Off = ChunkStart;
+            for (uint32 i = 0; i < NumSets; ++i)
+            {
+                FWmoDoodadSet Set;
+                Set.Name = ReadFixedCString(Base, Off, 20);
+                Off += 20;
+                Set.FirstDoodadIndex = ReadU32(Base, Off, DataSize);
+                Set.NumDoodads = ReadU32(Base, Off, DataSize);
+                /*padding*/ ReadU32(Base, Off, DataSize);
+                Result.DoodadSets.Add(MoveTemp(Set));
+            }
+        }
+        else if (ChunkMagic == WMO_MFOG)
+        {
+            // r654: fog definitions, 48 bytes each (flags, position, small/large radius, fog end, start scalar,
+            // BGRA colour, then the same three for under water).
+            uint32 Off = ChunkStart;
+            for (uint32 i = 0; i < ChunkSize / 48; ++i)
+            {
+                FWmoRootData::FFog Fog;
+                Fog.Flags = ReadU32(Base, Off, DataSize);
+                const float X = ReadFloat(Base, Off, DataSize);
+                const float Y = ReadFloat(Base, Off, DataSize);
+                const float Z = ReadFloat(Base, Off, DataSize);
+                Fog.Position = FVector(X, Y, Z);
+                Fog.SmallRadius = ReadFloat(Base, Off, DataSize);
+                Fog.LargeRadius = ReadFloat(Base, Off, DataSize);
+                Fog.End = ReadFloat(Base, Off, DataSize);
+                Fog.StartScalar = ReadFloat(Base, Off, DataSize);
+                {
+                    const uint8 B = ReadU8(Base, Off, DataSize), G = ReadU8(Base, Off, DataSize), R = ReadU8(Base, Off, DataSize), A = ReadU8(Base, Off, DataSize);
+                    Fog.Color = FColor(R, G, B, A);
+                }
+                Fog.UnderwaterEnd = ReadFloat(Base, Off, DataSize);
+                Fog.UnderwaterStartScalar = ReadFloat(Base, Off, DataSize);
+                {
+                    const uint8 B = ReadU8(Base, Off, DataSize), G = ReadU8(Base, Off, DataSize), R = ReadU8(Base, Off, DataSize), A = ReadU8(Base, Off, DataSize);
+                    Fog.UnderwaterColor = FColor(R, G, B, A);
+                }
+                Result.Fogs.Add(Fog);
+            }
+        }
+        else if (ChunkMagic == WMO_MODD)
+        {
+            // Doodad definitions: 40-byte records. The high byte of nameIndex
+            // stores placement flags; the low 24 bits are an offset into MODN.
+            const uint32 NumDefs = ChunkSize / 40;
+            Result.DoodadDefs.Reserve(NumDefs);
+
+            uint32 Off = ChunkStart;
+            for (uint32 i = 0; i < NumDefs; ++i)
+            {
+                FWmoDoodadDef Def;
+                const uint32 NameAndFlags = ReadU32(Base, Off, DataSize);
+                Def.NameOffset = NameAndFlags & 0x00FFFFFFu;
+                Def.Flags = static_cast<uint8>((NameAndFlags >> 24) & 0xFFu);
+
+                const float PosX = ReadFloat(Base, Off, DataSize);
+                const float PosY = ReadFloat(Base, Off, DataSize);
+                const float PosZ = ReadFloat(Base, Off, DataSize);
+                Def.Position = FVector(PosX, PosY, PosZ);
+
+                const float RotX = ReadFloat(Base, Off, DataSize);
+                const float RotY = ReadFloat(Base, Off, DataSize);
+                const float RotZ = ReadFloat(Base, Off, DataSize);
+                const float RotW = ReadFloat(Base, Off, DataSize);
+                Def.Rotation = FQuat(RotX, RotY, RotZ, RotW);
+                if (!Def.Rotation.IsNormalized())
+                {
+                    Def.Rotation.Normalize();
+                }
+
+                Def.Scale = ReadFloat(Base, Off, DataSize);
+
+                const uint8 B = ReadU8(Base, Off, DataSize);
+                const uint8 G = ReadU8(Base, Off, DataSize);
+                const uint8 R = ReadU8(Base, Off, DataSize);
+                const uint8 A = ReadU8(Base, Off, DataSize);
+                Def.Color = FColor(R, G, B, A);
+
+                Result.DoodadDefs.Add(MoveTemp(Def));
             }
         }
 
@@ -276,9 +474,32 @@ FWmoRootData FWmoParser::ParseRoot(const TArray<uint8>& Data)
         Offset = ChunkStart + ChunkSize;
     }
 
+    for (FWmoDoodadDef& Def : Result.DoodadDefs)
+    {
+        if (const FString* Resolved = Result.DoodadPathByOffset.Find(Def.NameOffset))
+        {
+            Def.Path = *Resolved;
+        }
+        else if (DoodNameTable && Def.NameOffset < DoodNameTableSize)
+        {
+            Def.Path = ReadStringFromTable(DoodNameTable, DoodNameTableSize, Def.NameOffset);
+            if (!Def.Path.IsEmpty())
+            {
+                Result.DoodadPathByOffset.Add(Def.NameOffset, Def.Path);
+            }
+        }
+    }
+
     Result.bIsValid = true;
-    UE_LOG(LogWmo, Log, TEXT("WMO root parsed: %d materials, %d groups, %d doodad paths"),
-        Result.Materials.Num(), Result.NumGroups, Result.DoodadPaths.Num());
+    if (ExpectedLightCount != 0 && Result.Lights.Num() != static_cast<int32>(ExpectedLightCount))
+    {
+        UE_LOG(LogWmo, Warning, TEXT("WMO root expected %u lights but parsed %d"),
+            ExpectedLightCount, Result.Lights.Num());
+    }
+
+    UE_LOG(LogWmo, Log, TEXT("WMO root parsed: %d materials, %d groups, %d doodad paths, %d sets, %d defs, %d lights"),
+        Result.Materials.Num(), Result.NumGroups, Result.DoodadPaths.Num(),
+        Result.DoodadSets.Num(), Result.DoodadDefs.Num(), Result.Lights.Num());
     return Result;
 }
 
@@ -345,9 +566,9 @@ FWmoGroupData FWmoParser::ParseGroup(const TArray<uint8>& Data)
             /*intBatchCount*/     ReadU16(Base, Off, DataSize);
             /*extBatchCount*/     ReadU16(Base, Off, DataSize);
             /*padding*/           ReadU16(Base, Off, DataSize);
-            // fogs[4]
-            Off += 4;
-            /*groupLiquid*/       ReadU32(Base, Off, DataSize);
+            // fogs[4] (r654: kept - indices into the root's MFOG)
+            for (int32 FogSlot = 0; FogSlot < 4; ++FogSlot) Result.FogIds[FogSlot] = ReadU8(Base, Off, DataSize);
+            Result.LiquidTypeId = ReadU32(Base, Off, DataSize);
             /*groupID*/           ReadU32(Base, Off, DataSize);
             /*unk1*/              ReadU32(Base, Off, DataSize);
             /*unk2*/              ReadU32(Base, Off, DataSize);
@@ -382,7 +603,18 @@ FWmoGroupData FWmoParser::ParseGroup(const TArray<uint8>& Data)
             break;
         }
 
-        if (ChunkMagic == WMO_MOVI)
+        if (ChunkMagic == WMO_MOPY)
+        {
+            const uint32 Count = ChunkSize / 2;
+            Result.TriangleMaterials.SetNum(Count);
+            uint32 Off = ChunkStart;
+            for (auto& Triangle : Result.TriangleMaterials)
+            {
+                Triangle.Flags = ReadU8(Base, Off, DataSize);
+                Triangle.MaterialId = ReadU8(Base, Off, DataSize);
+            }
+        }
+        else if (ChunkMagic == WMO_MOVI)
         {
             // Triangle indices: uint16 each
             const uint32 NumIndices = ChunkSize / 2;
@@ -458,6 +690,12 @@ FWmoGroupData FWmoParser::ParseGroup(const TArray<uint8>& Data)
                 /*flags*/             ReadU8(Base, Off, DataSize);
                 Batch.MaterialIndex = ReadU8(Base, Off, DataSize);
             }
+        }
+        else if (ChunkMagic == WMO_MODR)
+        {
+            // r539: doodads drawn with this group (portal culling hides them with it).
+            uint32 Off = ChunkStart;
+            for (uint32 i = 0; i < ChunkSize / 2; i++) Result.DoodadRefs.Add(ReadU16(Base, Off, DataSize));
         }
         else if (ChunkMagic == WMO_MOCV)
         {

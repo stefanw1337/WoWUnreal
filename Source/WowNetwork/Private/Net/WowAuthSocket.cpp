@@ -1,4 +1,5 @@
 #include "Net/WowAuthSocket.h"
+#include "WowLocale.h"
 #include "Crypto/WowSRP6.h"
 #include "WowSessionState.h"
 #include "Sockets.h"
@@ -27,6 +28,7 @@ FWowAuthSocket::~FWowAuthSocket()
 
 bool FWowAuthSocket::Connect(const FString& InHost, int32 InPort, const FString& InUsername, const FString& InPassword)
 {
+    CallbackActive = MakeShared<FThreadSafeBool, ESPMode::ThreadSafe>(true);
     Username = InUsername.ToUpper();
     Password = InPassword.ToUpper();
 
@@ -78,6 +80,7 @@ bool FWowAuthSocket::Connect(const FString& InHost, int32 InPort, const FString&
 
 void FWowAuthSocket::Disconnect()
 {
+    *CallbackActive = false;
     bRunning = false;
 
     {
@@ -195,8 +198,9 @@ void FWowAuthSocket::SendLogonChallenge()
     // os "Win" stored as "niW\0" so the auth server reverses it back to "Win"
     Packet.Add('n'); Packet.Add('i'); Packet.Add('W'); Packet.Add(0);
 
-    // country "enUS" reversed -> {'S', 'U', 'n', 'e'}
-    Packet.Add('S'); Packet.Add('U'); Packet.Add('n'); Packet.Add('e');
+    // Authentication carries the selected four-character client locale.
+    const FString Locale = WowLocale::Get();
+    for (int32 Index = 3; Index >= 0; --Index) Packet.Add(static_cast<uint8>(Locale[Index]));
 
     // timezone_bias (uint32 LE)
     Packet.Add(0); Packet.Add(0); Packet.Add(0); Packet.Add(0);
@@ -225,7 +229,7 @@ void FWowAuthSocket::HandleLogonChallenge()
     {
         UE_LOG(LogWowAuth, Error, TEXT("Failed to receive challenge response header"));
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -237,7 +241,7 @@ void FWowAuthSocket::HandleLogonChallenge()
     {
         UE_LOG(LogWowAuth, Error, TEXT("Logon challenge failed: cmd=%d error=%d"), Cmd, Error);
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -334,7 +338,7 @@ void FWowAuthSocket::HandleLogonChallenge()
     {
         UE_LOG(LogWowAuth, Error, TEXT("SRP6 credential computation failed"));
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -373,7 +377,7 @@ void FWowAuthSocket::HandleLogonProof()
     {
         UE_LOG(LogWowAuth, Error, TEXT("Failed to receive proof response"));
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -384,7 +388,7 @@ void FWowAuthSocket::HandleLogonProof()
     {
         UE_LOG(LogWowAuth, Error, TEXT("Unexpected response cmd=%d"), Cmd);
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -395,7 +399,7 @@ void FWowAuthSocket::HandleLogonProof()
         TArray<uint8> ExtraData;
         RecvBytes(ExtraData, 2);
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -405,7 +409,7 @@ void FWowAuthSocket::HandleLogonProof()
     {
         UE_LOG(LogWowAuth, Error, TEXT("Failed to receive proof success data"));
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -419,7 +423,7 @@ void FWowAuthSocket::HandleLogonProof()
     {
         UE_LOG(LogWowAuth, Error, TEXT("Server proof M2 verification failed!"));
         bRunning = false;
-        AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(false); });
+        AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(false); });
         return;
     }
 
@@ -427,7 +431,7 @@ void FWowAuthSocket::HandleLogonProof()
     bAuthComplete = true;
 
     UE_LOG(LogWowAuth, Log, TEXT("Authentication successful! Session key acquired (%d bytes)"), SessionKey.Num());
-    AsyncTask(ENamedThreads::GameThread, [this]() { OnAuthResult.ExecuteIfBound(true); });
+    AsyncTask(ENamedThreads::GameThread, [Callback = OnAuthResult, Active = CallbackActive]() { if (*Active) Callback.ExecuteIfBound(true); });
 }
 
 void FWowAuthSocket::HandleRealmList()
@@ -478,11 +482,12 @@ void FWowAuthSocket::HandleRealmList()
 
         // uint8 locked
         if (Offset >= Body.Num()) break;
-        Offset++; // skip locked
+        Realm.bLocked = Body[Offset++] != 0;
 
         // uint8 flags
         if (Offset >= Body.Num()) break;
         uint8 Flags = Body[Offset++];
+        Realm.Flags = Flags;
 
         // null-terminated name string
         FString Name;
@@ -514,7 +519,14 @@ void FWowAuthSocket::HandleRealmList()
             Realm.Port = 8085;
         }
 
-        // float population (4 bytes)
+        // float population (4 bytes, little endian)
+        if (Offset + 4 <= Body.Num())
+        {
+            uint32 Bits = Body[Offset] | (Body[Offset + 1] << 8) | (Body[Offset + 2] << 16) | (uint32(Body[Offset + 3]) << 24);
+            float Population = 0.f;
+            FMemory::Memcpy(&Population, &Bits, sizeof(Population));
+            Realm.Population = FMath::IsFinite(Population) ? Population : 0.f;
+        }
         Offset += 4;
 
         // uint8 char count
@@ -523,8 +535,9 @@ void FWowAuthSocket::HandleRealmList()
             Realm.CharacterCount = Body[Offset++];
         }
 
-        // uint8 timezone
-        Offset++;
+        // Realm category is the protocol timezone byte, used by the group tabs.
+        if (Offset >= Body.Num()) break;
+        Realm.Category = Body[Offset++];
 
         // uint8 realm_id
         if (Offset < Body.Num())
@@ -543,10 +556,7 @@ void FWowAuthSocket::HandleRealmList()
                *Realm.Name, Realm.RealmId, *Realm.Address, Realm.Port, Realm.CharacterCount);
     }
 
-    AsyncTask(ENamedThreads::GameThread, [this, Realms]()
-    {
-        OnRealmList.ExecuteIfBound(Realms);
-    });
+    AsyncTask(ENamedThreads::GameThread, [Callback = OnRealmList, Active = CallbackActive, Realms]() { if (*Active) Callback.ExecuteIfBound(Realms); });
 }
 
 bool FWowAuthSocket::SendBytes(const TArray<uint8>& Data)

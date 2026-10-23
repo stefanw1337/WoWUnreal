@@ -1,4 +1,5 @@
 #include "WowCharacterTexture.h"
+#include "WowPerformanceScope.h"
 #include "WowCharacterBuilder.h"
 #include "WowTextureFactory.h"
 #include "WowAssetCache.h"
@@ -7,6 +8,8 @@
 #include "Formats/BlpTypes.h"
 #include "Formats/Dbc/DbcStore.h"
 #include "Engine/Texture2D.h"
+#include "HAL/ThreadSafeCounter.h"
+#include "HAL/PlatformProcess.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogWowCharTex, Log, All);
 
@@ -396,20 +399,11 @@ static TMap<uint32, FRegionCoords> GetFallbackRegions()
     return Regions;
 }
 
-UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAssetCache* Cache,
-    const FCustomization& Customization)
+bool FWowCharacterTexture::BuildCompositePixels(FMpqManager* Mpq, const FCustomization& Customization,
+    TArray<uint8>& OutPixels, uint32& OutWidth, uint32& OutHeight)
 {
-    if (!Mpq) return nullptr;
-
-    // Cache key includes all customization parameters
-    FString CacheKey = FString::Printf(TEXT("CharTex_%d_%d_%d_%d_%d_%d_%d"),
-        Customization.RaceId, Customization.Gender, Customization.SkinColor,
-        Customization.FaceVariation, Customization.HairStyle, Customization.HairColor,
-        Customization.FacialHairStyle);
-
-    UTexture2D* CachedTex = Cache ? Cache->FindTexture(CacheKey) : nullptr;
-    if (CachedTex) return CachedTex;
-
+    FWowPerformanceScope Timing(TEXT("character-atlas-pixels"), FString::Printf(TEXT("race=%u sex=%u"),Customization.RaceId,Customization.Gender));
+    if (!Mpq) return false;
     // 1. Get layout dimensions from DBC or use fallback
     uint32 LayoutId = 1; // Default layout for all character textures in 3.3.5
     uint32 CompositeW = 512, CompositeH = 512; // WMVx: 256*2 scale factor for WotLK
@@ -455,7 +449,7 @@ UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAs
     {
         UE_LOG(LogWowCharTex, Warning, TEXT("No skin texture for Race=%d Gender=%d SkinColor=%d"),
             Customization.RaceId, Customization.Gender, Customization.SkinColor);
-        return nullptr;
+        return false;
     }
 
     uint32 SkinW, SkinH;
@@ -463,19 +457,7 @@ UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAs
     if (SkinPixels.Num() == 0)
     {
         UE_LOG(LogWowCharTex, Warning, TEXT("Failed to load/decompress skin: %s"), *SkinPath);
-        // Fall back to returning BLP as-is via texture factory
-        TArray<uint8> BlpRaw;
-        if (Mpq->ReadFile(SkinPath, BlpRaw))
-        {
-            FBlpTexture Blp = FBlpParser::Parse(BlpRaw);
-            if (Blp.bIsValid)
-            {
-                UTexture2D* Tex = FWowTextureFactory::CreateTexture(Blp, CacheKey);
-                if (Tex && Cache) Cache->CacheTexture(CacheKey, Tex);
-                return Tex;
-            }
-        }
-        return nullptr;
+        return false; // BuildCompositeTexture falls back to the raw skin BLP
     }
 
     // Skin texture fills the entire atlas (it IS full-body)
@@ -550,7 +532,7 @@ UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAs
     {
         if (Entry.RaceID != Customization.RaceId || Entry.SexID != Customization.Gender) continue;
         if (Entry.Type != static_cast<uint32>(ESectionType::FacialHair)) continue;
-        if (Entry.Variation != Customization.FacialHairStyle) continue;
+        if (Entry.Variation != Customization.FacialHairStyle || Entry.Color != Customization.HairColor) continue;
 
         for (int32 TexIdx = 0; TexIdx < 2; ++TexIdx)
         {
@@ -621,6 +603,66 @@ UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAs
         }
     }
 
+    UE_LOG(LogWowCharTex, Log, TEXT("Composited character atlas: %dx%d, %d layers"), CompositeW, CompositeH, LayersComposited);
+    OutPixels = MoveTemp(Composite);
+    OutWidth = CompositeW;
+    OutHeight = CompositeH;
+    return true;
+}
+
+FString FWowCharacterTexture::MakeCompositeCacheKey(const FCustomization& Customization)
+{
+    return FString::Printf(TEXT("CharTex_%d_%d_%d_%d_%d_%d_%d"),
+        Customization.RaceId, Customization.Gender, Customization.SkinColor,
+        Customization.FaceVariation, Customization.HairStyle, Customization.HairColor,
+        Customization.FacialHairStyle);
+}
+
+namespace { FThreadSafeCounter GWowCharacterAtlasJobs; }
+void FWowCharacterTexture::BeginAsyncWork() { GWowCharacterAtlasJobs.Increment(); }
+void FWowCharacterTexture::EndAsyncWork() { GWowCharacterAtlasJobs.Decrement(); }
+void FWowCharacterTexture::WaitForAsyncWork()
+{
+    const double Until = FPlatformTime::Seconds() + 10.0;
+    while (GWowCharacterAtlasJobs.GetValue() > 0 && FPlatformTime::Seconds() < Until) FPlatformProcess::Sleep(0.002f);
+}
+
+UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAssetCache* Cache,
+    const FCustomization& Customization)
+{
+    FWowPerformanceScope Timing(TEXT("character-atlas"), FString::Printf(TEXT("race=%u sex=%u"),Customization.RaceId,Customization.Gender));
+    if (!Mpq) return nullptr;
+
+    // Cache key includes all customization parameters
+    FString CacheKey = FString::Printf(TEXT("CharTex_%d_%d_%d_%d_%d_%d_%d"),
+        Customization.RaceId, Customization.Gender, Customization.SkinColor,
+        Customization.FaceVariation, Customization.HairStyle, Customization.HairColor,
+        Customization.FacialHairStyle);
+
+    UTexture2D* CachedTex = Cache ? Cache->FindTexture(CacheKey) : nullptr;
+    if (CachedTex) return CachedTex;
+
+    TArray<uint8> Composite;
+    uint32 CompositeW = 0, CompositeH = 0;
+    if (!BuildCompositePixels(Mpq, Customization, Composite, CompositeW, CompositeH))
+    {
+        // The skin could not be decoded: hand back the raw skin BLP (old behaviour).
+        const FString SkinPath = GetSectionTexture(Customization.RaceId, Customization.Gender,
+            ESectionType::Skin, INDEX_NONE, static_cast<int32>(Customization.SkinColor));
+        TArray<uint8> BlpRaw;
+        if (!SkinPath.IsEmpty() && Mpq->ReadFile(SkinPath, BlpRaw))
+        {
+            FBlpTexture Blp = FBlpParser::Parse(BlpRaw);
+            if (Blp.bIsValid)
+            {
+                UTexture2D* Tex = FWowTextureFactory::CreateTexture(Blp, CacheKey);
+                if (Tex && Cache) Cache->CacheTexture(CacheKey, Tex);
+                return Tex;
+            }
+        }
+        return nullptr;
+    }
+
     // 9. Create UTexture2D from composited RGBA pixels
     UTexture2D* Tex = UTexture2D::CreateTransient(CompositeW, CompositeH, PF_R8G8B8A8, *CacheKey);
     if (!Tex) return nullptr;
@@ -639,8 +681,7 @@ UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAs
 
     if (Cache) Cache->CacheTexture(CacheKey, Tex);
 
-    UE_LOG(LogWowCharTex, Log, TEXT("Built composite character texture using WMV region-based approach: %dx%d, %d layers composited"),
-        CompositeW, CompositeH, LayersComposited);
+    UE_LOG(LogWowCharTex, Log, TEXT("Built composite character texture: %dx%d"), CompositeW, CompositeH);
 
     return Tex;
 }
@@ -648,6 +689,7 @@ UTexture2D* FWowCharacterTexture::BuildCompositeTexture(FMpqManager* Mpq, FWowAs
 void FWowCharacterTexture::ApplyEquipmentOverlays(TArray<uint8>& Composite, uint32 CompositeW, uint32 CompositeH,
     const FWowCharacterBuilder::FBodyEquipment& Equipment, FMpqManager* Mpq, FWowAssetCache* Cache)
 {
+    FWowPerformanceScope Timing(TEXT("equipment-atlas"), FString::Printf(TEXT("race=%u sex=%u"),Equipment.RaceId,Equipment.Gender));
     if (!Mpq || Composite.Num() == 0) return;
 
     const FDbcStore& Dbc = FDbcStore::Get();
@@ -666,6 +708,18 @@ void FWowCharacterTexture::ApplyEquipmentOverlays(TArray<uint8>& Composite, uint
     else
     {
         RegionCoords = GetFallbackRegions();
+    }
+    // HD bodies use the same layout at a larger scale (2048x1024 = 4x the 256-high
+    // classic layout, with the face area added on the right): scale every region.
+    {
+        uint32 LayoutH = 0;
+        for (const auto& Pair : RegionCoords) LayoutH = FMath::Max(LayoutH, Pair.Value.Y + Pair.Value.H);
+        if (LayoutH > 0 && CompositeH > LayoutH)
+        {
+            const uint32 Scale = CompositeH / LayoutH;
+            for (auto& Pair : RegionCoords)
+            { Pair.Value.X *= Scale; Pair.Value.Y *= Scale; Pair.Value.W *= Scale; Pair.Value.H *= Scale; }
+        }
     }
 
     // Texture overlay index → Region mapping:
@@ -870,4 +924,39 @@ void FWowCharacterTexture::ApplyEquipmentOverlays(TArray<uint8>& Composite, uint
     // TABARD: overlays [3]=TORSO_UPPER, [4]=TORSO_LOWER
     TArray<uint32> TabardRegions = {3, 4};
     ApplyItemOverlays(Equipment.TabardDisplayId, TabardRegions);
+
+    // r343: the guild design on the blank Guild Tabard (Stefan: guild members wore plain white).
+    // Background colour, border (style+colour) and emblem (style+colour) layers per torso half,
+    // Textures\GuildEmblems\*_TU_U.blp (128x64) and *_TL_U.blp (128x32).
+    const uint32 Guild = Equipment.GuildTabard;
+    if ((Guild & 0x80000000u) && Equipment.TabardDisplayId)
+    {
+        // r551: layout with a 7-bit background (colours 0-50), see MakeGuildTabard.
+        const uint32 EmblemStyle = (Guild >> 21) & 0xffu, EmblemColor = (Guild >> 16) & 0x1fu;
+        const uint32 BorderStyle = (Guild >> 12) & 0xfu, BorderColor = (Guild >> 7) & 0x1fu, Background = Guild & 0x7fu;
+        const TCHAR* Halves[2] = { TEXT("TU"), TEXT("TL") };
+        const int32 HalfRegions[2] = { 3, 4 };
+        for (int32 Half = 0; Half < 2; ++Half)
+        {
+            const FRegionCoords* Region = RegionCoords.Find(HalfRegions[Half]);
+            if (!Region) continue;
+            const FString Layers[3] = {
+                FString::Printf(TEXT("Textures\\GuildEmblems\\Background_%02u_%s_U.blp"), Background, Halves[Half]),
+                FString::Printf(TEXT("Textures\\GuildEmblems\\Border_%02u_%02u_%s_U.blp"), BorderStyle, BorderColor, Halves[Half]),
+                FString::Printf(TEXT("Textures\\GuildEmblems\\Emblem_%02u_%02u_%s_U.blp"), EmblemStyle, EmblemColor, Halves[Half]) };
+            for (const FString& Layer : Layers)
+            {
+                uint32 LayerW = 0, LayerH = 0;
+                const TArray<uint8> Pixels = LoadBlpAsRGBA(Mpq, Layer, LayerW, LayerH);
+                if (Pixels.Num() == 0) { UE_LOG(LogWowCharTex, Warning, TEXT("Guild tabard layer not found: %s"), *Layer); continue; }
+                PasteRegionWithAlpha(Composite, Pixels, CompositeW, CompositeH, LayerW, LayerH, Region->X, Region->Y, Region->W, Region->H);
+            }
+        }
+    }
+}
+
+TArray<uint8> FWowCharacterTexture::LoadBlpRGBA(FMpqManager* Mpq, const FString& Path, uint32& OutW, uint32& OutH)
+{
+    if (!Mpq) { OutW = OutH = 0; return TArray<uint8>(); }
+    return LoadBlpAsRGBA(Mpq, Path, OutW, OutH);
 }

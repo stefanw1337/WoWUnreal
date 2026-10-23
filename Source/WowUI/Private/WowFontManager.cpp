@@ -4,6 +4,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Fonts/CompositeFont.h"
+#include "HAL/FileManager.h"
+#include "Styling/CoreStyle.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogWowFont, Log, All);
 
@@ -59,12 +61,26 @@ bool FWowFontManager::Initialize(FMpqManager* Mpq)
 	{
 		FString LocalPath = FontsDirectory / FontPair.Value;
 
-		// Skip if already extracted
+		// r280 (Stefan 13.10, Diablo 3 login patch): a font extracted once was kept for good, so a
+		// patch MPQ replacing Fonts\FRIZQT__.TTF (Exocet) never showed. The extracted copy is
+		// refreshed whenever the MPQs hold a different file; it is kept when they hold none.
 		if (PlatformFile.FileExists(*LocalPath))
 		{
+			TArray<uint8> MpqData, LocalData;
+			if (Mpq->ReadFile(FontPair.Key, MpqData) && !MpqData.IsEmpty()
+				&& (!FFileHelper::LoadFileToArray(LocalData, *LocalPath) || LocalData != MpqData))
+			{
+				if (FFileHelper::SaveArrayToFile(MpqData, *LocalPath))
+				{
+					UE_LOG(LogWowFont, Log, TEXT("Font changed in the MPQs, re-extracted: %s (%d bytes)"), *FontPair.Key, MpqData.Num());
+				}
+				else
+				{
+					UE_LOG(LogWowFont, Warning, TEXT("Font changed in the MPQs but could not be rewritten: %s"), *LocalPath);
+				}
+			}
 			AvailableFonts.Add(FontPair.Value, LocalPath);
 			ExtractedCount++;
-			UE_LOG(LogWowFont, Verbose, TEXT("Font already extracted: %s"), *FontPair.Value);
 			continue;
 		}
 
@@ -80,7 +96,13 @@ bool FWowFontManager::Initialize(FMpqManager* Mpq)
 		}
 	}
 
-	if (ExtractedCount == 0)
+    // Register locally supplied fonts as well as the four original MPQ fonts.
+    TArray<FString> LocalFonts;
+    IFileManager::Get().FindFiles(LocalFonts, *(FontsDirectory / TEXT("*.ttf")), true, false);
+    for (const FString& Filename : LocalFonts)
+        AvailableFonts.Add(Filename.ToUpper(), FontsDirectory / Filename);
+
+	if (AvailableFonts.IsEmpty())
 	{
 		UE_LOG(LogWowFont, Error, TEXT("No fonts could be extracted"));
 		return false;
@@ -91,7 +113,7 @@ bool FWowFontManager::Initialize(FMpqManager* Mpq)
 
 	bInitialized = true;
 	UE_LOG(LogWowFont, Log, TEXT("WoW font manager initialized successfully (%d fonts available)"), ExtractedCount);
-	UE_LOG(LogWowFont, Warning, TEXT("Note: TTF fonts extracted to %s may need system installation for proper loading"), *FontsDirectory);
+    UE_LOG(LogWowFont, Log, TEXT("Registered %d local font files"), AvailableFonts.Num());
 	return true;
 }
 
@@ -114,6 +136,12 @@ FSlateFontInfo FWowFontManager::GetFont(const FString& WowFontName, int32 Size) 
 		return FSlateFontInfo();
 	}
 
+    FString FileKey = WowFontName.Replace(TEXT("\\"), TEXT("/"));
+    FileKey = FPaths::GetCleanFilename(FileKey).ToUpper();
+    if (!FileKey.EndsWith(TEXT(".TTF"))) FileKey += TEXT(".TTF");
+    if (FileKey == TEXT("SCROLL.TTF")) return GetScrollFont(Size);
+    if (const FString* LocalFile = AvailableFonts.Find(FileKey)) return CreateFontFromFile(*LocalFile, Size);
+
 	// Look up the TTF file for this WoW font name
 	const FString* TtfFileName = FontMappings.Find(WowFontName);
 	if (!TtfFileName)
@@ -121,6 +149,8 @@ FSlateFontInfo FWowFontManager::GetFont(const FString& WowFontName, int32 Size) 
 		UE_LOG(LogWowFont, Verbose, TEXT("Unknown WoW font name '%s', using default"), *WowFontName);
 		return GetDefaultFont(Size);
 	}
+
+    if (*TtfFileName == TEXT("SCROLL.TTF")) return GetScrollFont(Size);
 
 	// Find the actual file path
 	const FString* FilePath = AvailableFonts.Find(*TtfFileName);
@@ -231,14 +261,17 @@ void FWowFontManager::SetupFontMappings()
 
 	// ARIALN for smaller text and tooltips
 	FontMappings.Add(TEXT("GameTooltipText"), TEXT("ARIALN.TTF"));
+	// The 3.3.5 chat font (ChatFontNormal/ChatFontSmall) is Arial Narrow.
+	FontMappings.Add(TEXT("ChatFontNormal"), TEXT("ARIALN.TTF"));
+	FontMappings.Add(TEXT("ChatFontSmall"), TEXT("ARIALN.TTF"));
 	FontMappings.Add(TEXT("GameTooltipTextSmall"), TEXT("ARIALN.TTF"));
 	FontMappings.Add(TEXT("TooltipFont"), TEXT("ARIALN.TTF"));
 	FontMappings.Add(TEXT("QuestFont"), TEXT("ARIALN.TTF"));
 	FontMappings.Add(TEXT("QuestFontNormalSmall"), TEXT("ARIALN.TTF"));
 
 	// MORPHEUS for headers and titles
-	FontMappings.Add(TEXT("GameFontNormalHuge"), TEXT("MORPHEUS.TTF"));
-	FontMappings.Add(TEXT("GameFontHighlightHuge"), TEXT("MORPHEUS.TTF"));
+	FontMappings.Add(TEXT("GameFontNormalHuge"), TEXT("SCROLL.TTF"));
+	FontMappings.Add(TEXT("GameFontHighlightHuge"), TEXT("SCROLL.TTF"));
 	FontMappings.Add(TEXT("ErrorFont"), TEXT("MORPHEUS.TTF"));
 	FontMappings.Add(TEXT("ZoneTextFont"), TEXT("MORPHEUS.TTF"));
 	FontMappings.Add(TEXT("SubZoneTextFont"), TEXT("MORPHEUS.TTF"));
@@ -250,7 +283,7 @@ void FWowFontManager::SetupFontMappings()
 	UE_LOG(LogWowFont, Log, TEXT("Set up %d font mappings"), FontMappings.Num());
 }
 
-void FWowFontManager::RegisterFontMapping(const FString& WowFontName, const FString& InheritsFrom, int32 DefaultSize)
+void FWowFontManager::RegisterFontMapping(const FString& WowFontName, const FString& InheritsFrom, int32 DefaultSize, const FString& FontFile)
 {
 	if (!bInitialized)
 	{
@@ -258,6 +291,19 @@ void FWowFontManager::RegisterFontMapping(const FString& WowFontName, const FStr
 		return;
 	}
 
+	// r289 (Stefan 13.10: the chat used the login screen's font): the font= file was ignored, so
+	// NumberFont_Shadow_Med (Fonts\ARIALN.TTF, no inherits) became Friz Quadrata and ChatFontNormal,
+	// which inherits it, too - with the Diablo 3 patch's Friz replacement the chat turned Exocet. A
+	// declared file now sets the mapping, as in the client.
+	if (!FontFile.IsEmpty())
+	{
+		const FString FileKey = FPaths::GetCleanFilename(FontFile.Replace(TEXT("\\"), TEXT("/"))).ToUpper();
+		if (AvailableFonts.Contains(FileKey))
+		{
+			FontMappings.Add(WowFontName, FileKey);
+			return;
+		}
+	}
 	// If this font inherits from another, copy its mapping
 	if (!InheritsFrom.IsEmpty())
 	{
@@ -278,8 +324,45 @@ void FWowFontManager::RegisterFontMapping(const FString& WowFontName, const FStr
 	}
 	else
 	{
-		// No inheritance, use default font
-		FontMappings.Add(WowFontName, TEXT("FRIZQT__.TTF"));
+		// No inheritance: keep a known mapping (e.g. ChatFontNormal -> ARIALN, as in
+		// Fonts.xml) instead of forcing Friz Quadrata; unknown fonts use the default.
+		if (!FontMappings.Contains(WowFontName))
+		{
+			FontMappings.Add(WowFontName, TEXT("FRIZQT__.TTF"));
+		}
 		UE_LOG(LogWowFont, Verbose, TEXT("Registered font mapping: %s -> FRIZQT__.TTF (no inheritance)"), *WowFontName);
 	}
+}
+FSlateFontInfo FWowFontManager::GetScrollFont(int32 Size)
+{
+    const FString Directory=FPaths::ProjectSavedDir()/TEXT("Fonts");
+    const FString Scroll=Directory/TEXT("SCROLL.ttf");
+    if (!IFileManager::Get().FileExists(*Scroll))
+    {
+        const FString Original=Directory/TEXT("MORPHEUS.TTF");
+        if (!IFileManager::Get().FileExists(*Original)) return FCoreStyle::GetDefaultFontStyle("Bold",Size);
+        static TSharedPtr<const FCompositeFont> OriginalFont=MakeShared<FCompositeFont>(
+            FName(TEXT("Heading")),Original,EFontHinting::Default,EFontLoadingPolicy::LazyLoad);
+        return FSlateFontInfo(OriginalFont,Size);
+    }
+    static TSharedPtr<const FCompositeFont> Font=[Directory,Scroll]() {
+        auto Composite=MakeShared<FCompositeFont>(FName(TEXT("Scroll")),Scroll,EFontHinting::Default,EFontLoadingPolicy::LazyLoad);
+        // Scroll has 70 glyphs: use Friz for +, accents and other missing characters.
+        const FString Fallback=Directory/TEXT("FRIZQT__.TTF");
+        if (IFileManager::Get().FileExists(*Fallback))
+            Composite->FallbackTypeface.Typeface.Fonts.Emplace(FName(TEXT("Scroll")),Fallback,EFontHinting::Default,EFontLoadingPolicy::LazyLoad);
+        return Composite;
+    }();
+    return FSlateFontInfo(Font,Size,FName(TEXT("Scroll")));
+}
+
+void FWowFontManager::RegisterFontStyle(const FString& WowFontName, const FString& InheritsFrom, bool bHasHeight, float Height, const FLinearColor* Color)
+{
+	if (WowFontName.IsEmpty()) return;
+	FFontStyle Style;
+	if (!InheritsFrom.IsEmpty())
+		if (const FFontStyle* Parent = FontStyles.Find(InheritsFrom)) Style = *Parent;
+	if (bHasHeight && Height > 0.f) { Style.Height = Height; Style.bHasHeight = true; }
+	if (Color) { Style.Color = *Color; Style.bHasColor = true; }
+	FontStyles.Add(WowFontName, Style);
 }

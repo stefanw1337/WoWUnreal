@@ -1,4 +1,7 @@
 #include "SWowCharacterPanel.h"
+#include "WowFontManager.h"
+#include "WowWindowStyle.h"
+#include "WowItemPresentation.h"
 #include "WowInventoryManager.h"
 #include "WowConnectionManager.h"
 #include "WowEntity.h"
@@ -7,6 +10,9 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Layout/SGridPanel.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/SBoxPanel.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
 #include "Framework/Application/SlateApplication.h"
 #include "InputCoreTypes.h"
 #include "HAL/UnrealMemory.h"
@@ -76,12 +82,25 @@ void SWowEquipmentSlot::OnMouseEnter(const FGeometry& MyGeometry, const FPointer
 {
     bIsHovered = true;
 
-    // TODO: Show tooltip with item info
+    if (!InventoryManager.IsValid())
+    {
+        return;
+    }
+
+    const FWowItemSlot* ItemSlot = InventoryManager->GetEquippedItem(SlotIndex);
+    if (!ItemSlot || ItemSlot->IsEmpty())
+    {
+        return;
+    }
+
+    // Equipped items have nothing to compare against.
+    SetToolTip(FWowItemPresentation::Tooltip(InventoryManager->GetConnectionManager(), ItemSlot->ItemEntry, false));
 }
 
 void SWowEquipmentSlot::OnMouseLeave(const FPointerEvent& MouseEvent)
 {
     bIsHovered = false;
+    SetToolTip(nullptr);
 }
 
 void SWowEquipmentSlot::UpdateSlotDisplay()
@@ -133,9 +152,7 @@ void SWowCharacterPanel::Construct(const FArguments& InArgs, TSharedPtr<FWowInve
 
     ChildSlot
     [
-        SNew(SBorder)
-        .BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder"))
-        .BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.05f, 0.9f))
+        SNew(SWowWindowFrame)
         .Padding(8.0f)
         [
             SAssignNew(MainLayout, SVerticalBox)
@@ -151,7 +168,7 @@ void SWowCharacterPanel::Construct(const FArguments& InArgs, TSharedPtr<FWowInve
                 [
                     SAssignNew(CharacterNameText, STextBlock)
                     .Text(NSLOCTEXT("WowUI", "CharacterName", "Character"))
-                    .Font(FAppStyle::GetFontStyle("NormalFont"))
+                    .Font(FWowFontManager::GetScrollFont(12))
                     .ColorAndOpacity(FLinearColor::White)
                 ]
                 + SHorizontalBox::Slot()
@@ -593,7 +610,7 @@ void SWowCharacterPanel::Construct(const FArguments& InArgs, TSharedPtr<FWowInve
     // Bind to inventory changes
     if (InventoryManager.IsValid())
     {
-        InventoryManager->OnInventoryChanged.AddRaw(this, &SWowCharacterPanel::OnInventoryChanged);
+        InventoryManager->OnInventoryChanged.AddSP(this, &SWowCharacterPanel::OnInventoryChanged);
     }
 
     SetPanelVisibility(EVisibility::Hidden);

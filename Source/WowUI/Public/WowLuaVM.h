@@ -9,15 +9,25 @@ public:
     FWowLuaVM();
     ~FWowLuaVM();
     bool Initialize();
+    /** Reset the execution budget only when entering Lua from the host, never on reentry. */
+    static int ProtectedCall(lua_State* State, int Arguments, int Results, int ErrorFunction);
     void Shutdown();
     /** Save all addon SavedVariables to disk */
     void SaveAllVariables();
     bool ExecuteString(const FString& Code, const FString& ChunkName = TEXT("="));
     bool ExecuteBuffer(const TArray<uint8>& Buffer, const FString& ChunkName);
+    /**
+     * Run an addon file the way the 3.3.5 client does: the chunk receives
+     * (addonName, addonTable) as "...", where addonTable is one private table shared
+     * by every file of that addon. Chunk name is "@path" so errors and debugstack()
+     * report "Interface\AddOns\X\file.lua:line" like the original client.
+     */
+    bool ExecuteAddonBuffer(const TArray<uint8>& Buffer, const FString& ChunkName, const FString& AddonName);
     void FireEvent(const FString& EventName, const TArray<FString>& Args = {});
     lua_State* GetState() const { return L; }
     bool IsInitialized() const { return L != nullptr; }
-    void StepGarbageCollector(int32 StepSize = 1024);
+    /** Perform one small incremental Lua GC step, measured in KiB of allocation debt. */
+    void StepGarbageCollector(int32 StepSize = 16);
     void CollectGarbage();
     bool CollectGarbageIfNeeded(double PressureThreshold = 0.75);
 

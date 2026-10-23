@@ -16,17 +16,27 @@ struct FSpellVisualDbcEntry
 	int32 MissileModel;
 	uint32 MissilePathType;
 	uint32 MissileDestinationAttachment;
+	uint32 MissileSound;
+	uint32 AnimEventSoundID;
+	uint32 Flags;
+	uint32 CasterImpactKit;
+	uint32 TargetImpactKit;
+	uint32 MissileAttachment;
+	float MissileFollowGroundHeight;
+	float MissileFollowGroundDropSpeed;
+	float MissileFollowGroundApproach;
+	uint32 MissileFollowGroundFlags;
+	uint32 MissileMotion;
+	uint32 MissileTargetingKit;
+	uint32 InstantAreaKit;
+	uint32 ImpactAreaKit;
+	uint32 PersistentAreaKit;
 	float MissileCastOffsetX;
 	float MissileCastOffsetY;
 	float MissileCastOffsetZ;
 	float MissileImpactOffsetX;
 	float MissileImpactOffsetY;
 	float MissileImpactOffsetZ;
-	uint32 AnimEventSoundID;
-	uint32 Flags;
-	uint32 MissileAttachment;
-	float MissileFollowGroundHeight;
-	float MissileFollowGroundDropSpeed;
 };
 
 class WOWDATA_API FSpellVisualDbc

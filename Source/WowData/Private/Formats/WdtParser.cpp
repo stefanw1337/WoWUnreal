@@ -7,6 +7,7 @@ static constexpr uint32 WDT_MVER = MakeFourCC('R', 'E', 'V', 'M');
 static constexpr uint32 WDT_MPHD = MakeFourCC('D', 'H', 'P', 'M');
 static constexpr uint32 WDT_MAIN = MakeFourCC('N', 'I', 'A', 'M');
 static constexpr uint32 WDT_MWMO = MakeFourCC('O', 'M', 'W', 'M');
+static constexpr uint32 WDT_MODF = MakeFourCC('F', 'D', 'O', 'M');
 
 FWdtData FWdtParser::Parse(const TArray<uint8>& Data)
 {
@@ -55,6 +56,23 @@ FWdtData FWdtParser::Parse(const TArray<uint8>& Data)
             {
                 Result.GlobalWmoPath = FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(ChunkData)));
             }
+        }
+        else if (Magic == WDT_MODF && Size >= 64)
+        {
+            // r556: the placement of the global WMO (64 bytes, as in an ADT MODF).
+            auto F = [ChunkData](int32 Offset) { return *reinterpret_cast<const float*>(ChunkData + Offset); };
+            auto U16 = [ChunkData](int32 Offset) { return *reinterpret_cast<const uint16*>(ChunkData + Offset); };
+            FAdtWmoPlacement& P = Result.GlobalWmoPlacement;
+            P.NameIndex = 0;
+            P.UniqueId = *reinterpret_cast<const uint32*>(ChunkData + 4);
+            P.Position = FVector(F(8), F(12), F(16));
+            P.Rotation = FVector(F(20), F(24), F(28));
+            P.BoundingBox = FBox(FVector(F(32), F(36), F(40)), FVector(F(44), F(48), F(52)));
+            P.Flags = U16(56);
+            P.DoodadSet = U16(58);
+            P.NameSet = U16(60);
+            P.Scale = U16(62);
+            Result.bHasGlobalWmoPlacement = true;
         }
 
         Ptr = ChunkData + Size;

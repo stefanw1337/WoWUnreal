@@ -15,6 +15,11 @@ extern "C" {
 #define HAS_LUA 0
 #endif
 
+bool FWowEventSystem::ExecuteLuaString(const FString& Code, const FString& ChunkName)
+{
+	return LuaVM && LuaVM->IsInitialized() && LuaVM->ExecuteString(Code, ChunkName);
+}
+
 DEFINE_LOG_CATEGORY_STATIC(LogWowEvent, Log, All);
 
 #if HAS_LUA
@@ -54,6 +59,62 @@ namespace
 		return StackIndex > 0 || StackIndex <= LUA_REGISTRYINDEX
 			? StackIndex
 			: lua_gettop(L) + StackIndex + 1;
+	}
+
+	static bool IsNumericEventArgument(const FString& EventName, int32 ArgIndex)
+	{
+		// WoW's mirror timer FrameXML uses relational numeric comparisons
+		// (not merely arithmetic coercion) for value, max, scale and paused.
+		// These events were previously pushed entirely as strings, so the stock
+		// 3.3.5 MirrorTimer.lua aborted before it could initialise the bar.
+		if (EventName == TEXT("MIRROR_TIMER_START"))
+		{
+			return ArgIndex >= 1 && ArgIndex <= 4;
+		}
+        if ((EventName == TEXT("BAG_UPDATE") || EventName == TEXT("PLAYER_EQUIPMENT_CHANGED") ||
+            EventName == TEXT("EQUIP_BIND_CONFIRM") || EventName == TEXT("AUTOEQUIP_BIND_CONFIRM")) && ArgIndex == 0) return true;
+        if (EventName == TEXT("DELETE_ITEM_CONFIRM") && ArgIndex == 1) return true;
+        // r330 (Stefan 14.10: Smite dragged onto Bartender's first button kept an empty icon): the slot is a
+        // number - ActionButton.lua and LibActionButton test arg1 == 0 or arg1 == tonumber(self.action), which
+        // never matched the string "1", so only native-refreshed buttons updated.
+        if (EventName == TEXT("ACTIONBAR_SLOT_CHANGED") && ArgIndex == 0) return true;
+		return EventName == TEXT("MIRROR_TIMER_PAUSE") && ArgIndex == 1;
+	}
+
+	static void PushEventArgument(lua_State* L, const FString& EventName,
+		int32 ArgIndex, const FString& Arg)
+	{
+		// Typed argument from native code: "\x01n<number>", "\x01z" (nil), "\x01t"/"\x01f" (boolean).
+		// Used where an event mixes types per position (COMBAT_LOG_EVENT and friends).
+		if (Arg.Len() >= 2 && Arg[0] == TCHAR(1))
+		{
+			switch (Arg[1])
+			{
+			case TEXT('n'): lua_pushnumber(L, FCString::Atod(*Arg + 2)); return;
+			case TEXT('z'): lua_pushnil(L); return;
+			case TEXT('t'): lua_pushboolean(L, 1); return;
+			case TEXT('f'): lua_pushboolean(L, 0); return;
+			default: break;
+			}
+		}
+		if (IsNumericEventArgument(EventName, ArgIndex))
+		{
+			lua_pushnumber(L, FCString::Atod(*Arg));
+			return;
+		}
+
+		// CHAT_MSG_ADDON prefix/message are carried byte for byte (one TCHAR per
+		// byte) from the packet; hand Lua the original bytes (AIO payloads are binary).
+		if (ArgIndex <= 1 && EventName == TEXT("CHAT_MSG_ADDON"))
+		{
+			TArray<ANSICHAR> Bytes;
+			Bytes.Reserve(Arg.Len());
+			for (const TCHAR Char : Arg) Bytes.Add(static_cast<ANSICHAR>(Char & 0xFF));
+			lua_pushlstring(L, Bytes.GetData(), Bytes.Num());
+			return;
+		}
+		FTCHARToUTF8 UTF8Arg(*Arg);
+		lua_pushstring(L, UTF8Arg.Get());
 	}
 
 	static void RestoreLuaGlobals(lua_State* L, TArray<FLuaSavedGlobal>& SavedGlobals)
@@ -128,7 +189,7 @@ namespace
 		TArray<FLuaSavedGlobal> SavedGlobals;
 		SetWowHandlerGlobals(L, lua_gettop(L), 0, TArray<int32>(), SavedGlobals);
 
-		if (lua_pcall(L, 1, 0, 0) != 0)
+		if (FWowLuaVM::ProtectedCall(L, 1, 0, 0) != 0)
 		{
 			RestoreLuaGlobals(L, SavedGlobals);
 			UE_LOG(LogWowEvent, Error, TEXT("OnLoad error [%lld] %s: %hs"),
@@ -252,10 +313,9 @@ void FWowEventSystem::FireEvent(const FString& EventName, const TArray<FString>&
 		lua_pushstring(L, UTF8Event.Get());
 
 		// Push args
-		for (const FString& Arg : Args)
+		for (int32 ArgIndex = 0; ArgIndex < Args.Num(); ++ArgIndex)
 		{
-			FTCHARToUTF8 UTF8Arg(*Arg);
-			lua_pushstring(L, UTF8Arg.Get());
+			PushEventArgument(L, EventName, ArgIndex, Args[ArgIndex]);
 		}
 
 		// Call: func(self, event, arg1, arg2, ...)
@@ -272,7 +332,7 @@ void FWowEventSystem::FireEvent(const FString& EventName, const TArray<FString>&
 
 		TArray<FLuaSavedGlobal> SavedGlobals;
 		SetWowHandlerGlobals(L, SelfIndex, EventIndex, LegacyArgIndices, SavedGlobals);
-		if (lua_pcall(L, NumArgs, 0, 0) != 0)
+		if (FWowLuaVM::ProtectedCall(L, NumArgs, 0, 0) != 0)
 		{
 			RestoreLuaGlobals(L, SavedGlobals);
 			UE_LOG(LogWowEvent, Error, TEXT("OnEvent error [frame %lld] %s: %s"),
@@ -284,24 +344,48 @@ void FWowEventSystem::FireEvent(const FString& EventName, const TArray<FString>&
 			RestoreLuaGlobals(L, SavedGlobals);
 		}
 
-		if ((HandleIndex & 15) == 15)
-		{
-			LuaVM->CollectGarbageIfNeeded(0.60);
-			LuaVM->StepGarbageCollector();
-		}
 	}
 
-	LuaVM->StepGarbageCollector();
+	// Lua 5.1 interprets LUA_GCSTEP's data argument as KiB of allocation debt.
+	// The former 1024 KiB step after every 16 handlers (plus another at the end)
+	// could turn one large event dispatch into several megabytes of repeated GC
+	// work.  A single small incremental step keeps collection smooth; the pressure
+	// guard above still performs a full collection before the VM approaches its
+	// memory limit.
+	LuaVM->StepGarbageCollector(16);
 #endif
 }
 
 void FWowEventSystem::SetFrameScript(int64 Handle, const FString& ScriptName, const FString& Code)
 {
 #if HAS_LUA
-	if (!LuaVM || Code.IsEmpty()) return;
+	if (!LuaVM) return;
 
 	lua_State* L = LuaVM->GetState();
 	if (!L) return;
+
+	if (Code.IsEmpty())
+	{
+		// frame:SetScript(name, nil) removes the handler. This used to be ignored, so e.g.
+		// LibDBIcon's OnDragStop could not stop its OnUpdate and the minimap button kept
+		// following the cursor around the minimap.
+		if (TMap<FString, int32>* FrameScripts = ScriptRefs.Find(Handle))
+		{
+			if (const int32* OldRef = FrameScripts->Find(ScriptName))
+			{
+				luaL_unref(L, LUA_REGISTRYINDEX, *OldRef);
+				FrameScripts->Remove(ScriptName);
+			}
+		}
+		const FString GlobalKey = FString::Printf(TEXT("__WowScript_%lld_%s"), Handle, *ScriptName);
+		lua_pushnil(L);
+		lua_setglobal(L, TCHAR_TO_UTF8(*GlobalKey));
+		if (ScriptName == TEXT("OnUpdate"))
+		{
+			OnUpdateFrames.Remove(Handle);
+		}
+		return;
+	}
 
 	// Wrap the script code with the correct function signature for each script type.
 	// WoW scripts have different parameter names depending on their type:
@@ -323,7 +407,7 @@ void FWowEventSystem::SetFrameScript(int64 Handle, const FString& ScriptName, co
 		Params = TEXT("self, event, ...");
 	else if (ScriptName == TEXT("OnUpdate"))
 		Params = TEXT("self, elapsed, ...");
-	else if (ScriptName == TEXT("OnClick"))
+	else if (ScriptName == TEXT("OnClick") || ScriptName == TEXT("PreClick") || ScriptName == TEXT("PostClick"))
 		Params = TEXT("self, button, down, ...");
 	else if (ScriptName == TEXT("OnEnter") || ScriptName == TEXT("OnLeave"))
 		Params = TEXT("self, motion, ...");
@@ -365,7 +449,7 @@ void FWowEventSystem::SetFrameScript(int64 Handle, const FString& ScriptName, co
 	}
 
 	// Execute the chunk to get the function on the stack
-	if (lua_pcall(L, 0, 1, 0) != 0)
+	if (FWowLuaVM::ProtectedCall(L, 0, 1, 0) != 0)
 	{
 		UE_LOG(LogWowEvent, Error, TEXT("Script load error [%lld] %s: %s"),
 			Handle, *ScriptName, UTF8_TO_TCHAR(lua_tostring(L, -1)));
@@ -426,6 +510,35 @@ void FWowEventSystem::SetFrameScriptRef(int64 Handle, const FString& ScriptName,
 #endif
 }
 
+bool FWowEventSystem::PushFrameObject(int64 Handle) const
+{
+#if HAS_LUA
+	if (!LuaVM) return false;
+	lua_State* L = LuaVM->GetState();
+	const int32* Ref = FrameObjectRefs.Find(Handle);
+	if (!L || !Ref) return false;
+	lua_rawgeti(L, LUA_REGISTRYINDEX, *Ref);
+	if (lua_istable(L, -1)) return true;
+	lua_pop(L, 1);
+#endif
+	return false;
+}
+
+bool FWowEventSystem::PushFrameScript(int64 Handle, const FString& ScriptName) const
+{
+#if HAS_LUA
+	if (!LuaVM) return false;
+	lua_State* L = LuaVM->GetState();
+	const TMap<FString, int32>* FrameScripts = ScriptRefs.Find(Handle);
+	const int32* Ref = FrameScripts ? FrameScripts->Find(ScriptName) : nullptr;
+	if (!L || !Ref) return false;
+	lua_rawgeti(L, LUA_REGISTRYINDEX, *Ref);
+	if (lua_isfunction(L, -1)) return true;
+	lua_pop(L, 1);
+#endif
+	return false;
+}
+
 void FWowEventSystem::CreateFrameObject(int64 Handle, const FString& FrameName, int32 FrameID)
 {
 #if HAS_LUA
@@ -440,6 +553,10 @@ void FWowEventSystem::CreateFrameObject(int64 Handle, const FString& FrameName, 
 
 		lua_pushinteger(L, Handle);
 		lua_setfield(L, AbsTableIndex, "__handle");
+		// frame[0] is the frame's userdata in the client; SecureHandlers/RestrictedFrames test
+		// type(frame[0]) == "userdata" and build surrogates { [0] = frame[0], [1] = frame }.
+		lua_pushlightuserdata(L, reinterpret_cast<void*>(static_cast<uintptr_t>(Handle + 1)));
+		lua_rawseti(L, AbsTableIndex, 0);
 
 		if (!FrameName.IsEmpty())
 		{
@@ -694,7 +811,7 @@ bool FWowEventSystem::RunFrameScript(int64 Handle, const FString& ScriptName, co
 
 	TArray<FLuaSavedGlobal> SavedGlobals;
 	SetWowHandlerGlobals(L, SelfIndex, 0, LegacyArgIndices, SavedGlobals);
-	if (lua_pcall(L, NumArgs, 0, 0) != 0)
+	if (FWowLuaVM::ProtectedCall(L, NumArgs, 0, 0) != 0)
 	{
 		RestoreLuaGlobals(L, SavedGlobals);
 		const char* Err = lua_tostring(L, -1);
@@ -753,7 +870,7 @@ bool FWowEventSystem::RunFrameClickScript(int64 Handle, const FString& ScriptNam
 
 	TArray<FLuaSavedGlobal> SavedGlobals;
 	SetWowHandlerGlobals(L, SelfIndex, 0, LegacyArgIndices, SavedGlobals);
-	if (lua_pcall(L, NumArgs, 0, 0) != 0)
+	if (FWowLuaVM::ProtectedCall(L, NumArgs, 0, 0) != 0)
 	{
 		RestoreLuaGlobals(L, SavedGlobals);
 		const char* Err = lua_tostring(L, -1);
@@ -791,6 +908,20 @@ FString FWowEventSystem::GetFrameAttribute(int64 Handle, const FString& AttrName
 	}
 	lua_pop(L, 2); // pop value and table
 	return Result;
+#else
+	return FString();
+#endif
+}
+
+FString FWowEventSystem::GetGlobalString(const FString& Name) const
+{
+#if HAS_LUA
+	lua_State* L = LuaVM ? LuaVM->GetState() : nullptr;
+	if (!L || Name.IsEmpty()) return FString();
+	lua_getglobal(L, TCHAR_TO_UTF8(*Name));
+	const FString Value = lua_type(L, -1) == LUA_TSTRING ? FString(UTF8_TO_TCHAR(lua_tostring(L, -1))) : FString();
+	lua_pop(L, 1);
+	return Value;
 #else
 	return FString();
 #endif
@@ -864,13 +995,24 @@ static bool ShouldCompileOnLoadFunctionHandler(const FString& FunctionName)
 {
 	// Keep this intentionally narrow. A broad function="..." implementation
 	// wakes up Blizzard bootstrap paths that currently explode our Lua heap.
-	return FunctionName == TEXT("RuneFrame_OnLoad") ||
+	return FunctionName == TEXT("BuffFrame_OnLoad") ||
+        FunctionName == TEXT("PetCastingBarFrame_OnLoad") ||
+		FunctionName == TEXT("RuneFrame_OnLoad") ||
 		FunctionName == TEXT("GMChatFrame_OnLoad") ||
 		FunctionName == TEXT("Blizzard_CombatLog_QuickButtonFrame_OnLoad") ||
 		FunctionName == TEXT("LFRBrowseFrame_OnLoad") ||
 		FunctionName == TEXT("CombatFeedback_OnLoad") ||
 		FunctionName == TEXT("TextStatusBar_OnLoad") ||
-		FunctionName == TEXT("FadingFrame_OnLoad");
+		FunctionName == TEXT("FadingFrame_OnLoad") ||
+		// SecureHandler*Template: adds :Execute/:WrapScript/:SetFrameRef. Bartender4's bars
+		// call header:WrapScript and failed with "attempt to call method 'WrapScript'".
+		FunctionName == TEXT("SecureHandler_OnLoad") ||
+		// r354: Blizzard_BarberShopUI (load on demand) - labels and BARBER_SHOP_SUCCESS registration.
+		FunctionName == TEXT("BarberShop_OnLoad") ||
+		// Blizzard_Calendar (load on demand): CalendarFrame_OnLoad creates the 42 day buttons and
+		// the dropdowns/pickers set themselves up in their own OnLoad. Skipped, the window opened
+		// with no days at all and OnShow failed on CalendarDayButtons[1] (Stefan 11.10).
+		FunctionName.StartsWith(TEXT("Calendar"), ESearchCase::CaseSensitive);
 }
 
 #if HAS_LUA
@@ -899,6 +1041,35 @@ void FWowEventSystem::CompileFrameScripts(int64 Handle, const FWowFrameDef& Def)
 	CreateFrameObject(Handle, Def.Name, Def.FrameID);
 
 #if HAS_LUA
+	// r338 (OPEN_ISSUES: stock XML <Attributes> were not parsed): the frame's XML attributes are its
+	// initial attributes (GetAttribute reads __attr_<name>), set before OnLoad and without
+	// OnAttributeChanged, as the client creates them.
+	if (LuaVM && Def.XmlAttributes.Num() > 0)
+	{
+		lua_State* AttrState = LuaVM->GetState();
+		int32* AttrRef = AttrState ? FrameObjectRefs.Find(Handle) : nullptr;
+		if (AttrRef)
+		{
+			lua_rawgeti(AttrState, LUA_REGISTRYINDEX, *AttrRef);
+			if (lua_istable(AttrState, -1))
+			{
+				for (const FWowFrameDef::FXmlAttribute& Attr : Def.XmlAttributes)
+				{
+					if (Attr.Name.IsEmpty()) continue;
+					if (Attr.Type.Equals(TEXT("nil"), ESearchCase::IgnoreCase)) { lua_pushnil(AttrState); }
+					else if (Attr.Type.Equals(TEXT("number"), ESearchCase::IgnoreCase)) { lua_pushnumber(AttrState, FCString::Atod(*Attr.Value)); }
+					else if (Attr.Type.Equals(TEXT("boolean"), ESearchCase::IgnoreCase))
+					{
+						lua_pushboolean(AttrState, Attr.Value.Equals(TEXT("true"), ESearchCase::IgnoreCase) || Attr.Value == TEXT("1"));
+					}
+					else { lua_pushstring(AttrState, TCHAR_TO_UTF8(*Attr.Value)); }
+					const FString AttrKey = TEXT("__attr_") + Attr.Name;
+					lua_setfield(AttrState, -2, TCHAR_TO_UTF8(*AttrKey));
+				}
+			}
+			lua_pop(AttrState, 1);
+		}
+	}
 	// Set child element references on the parent frame table.
 	// WoW expects frame.healthBar, frame.text, frame.icon etc. to be set
 	// based on named children (ChildName minus ParentName prefix, first letter lowercased).
@@ -1485,7 +1656,7 @@ void FWowEventSystem::TickOnUpdate(float DeltaTime)
 		TArray<FLuaSavedGlobal> SavedGlobals;
 		SetWowHandlerGlobals(L, lua_gettop(L) - 1, 0, LegacyArgIndices, SavedGlobals);
 
-		if (lua_pcall(L, 2, 0, 0) != 0)
+		if (FWowLuaVM::ProtectedCall(L, 2, 0, 0) != 0)
 		{
 			RestoreLuaGlobals(L, SavedGlobals);
 			const FString FrameName = FrameManager ? FrameManager->GetFrameName(Handle) : FString();
@@ -1511,14 +1682,12 @@ void FWowEventSystem::TickOnUpdate(float DeltaTime)
 			RestoreLuaGlobals(L, SavedGlobals);
 		}
 
-		if ((HandleIndex & 15) == 15)
-		{
-			LuaVM->CollectGarbageIfNeeded(0.60);
-			LuaVM->StepGarbageCollector();
-		}
 	}
 
-	LuaVM->StepGarbageCollector();
+	// One bounded incremental step per rendered frame is sufficient.  The old
+	// 1024 KiB default was invoked after every 16 OnUpdate handlers and again
+	// here, multiplying GC work with the number of active UI frames.
+	LuaVM->StepGarbageCollector(16);
 #endif
 }
 
@@ -1528,7 +1697,9 @@ FString FWowEventSystem::OpcodeToEvent(uint16 Opcode)
 	switch (Opcode)
 	{
 	// Character / login
-	case 0x0236: return TEXT("PLAYER_LOGIN");                    // SMSG_LOGIN_VERIFY_WORLD
+	// SMSG_LOGIN_VERIFY_WORLD also arrives on every far teleport; PLAYER_LOGIN is fired
+	// once by UWowUIManager::LoadUI (addons such as LibDBIcon break when it repeats).
+	case 0x0236: return TEXT("");                                // SMSG_LOGIN_VERIFY_WORLD
 	case 0x006E: return TEXT("PLAYER_LEAVING_WORLD");            // SMSG_LOGOUT_COMPLETE
 
 	// Targeting
@@ -1615,6 +1786,8 @@ FString FWowEventSystem::OpcodeToEvent(uint16 Opcode)
 
 	// Achievement
 	case 0x0468: return TEXT("ACHIEVEMENT_EARNED");              // SMSG_ACHIEVEMENT_EARNED
+	case 0x0436: return TEXT("CALENDAR_UPDATE_EVENT_LIST");      // SMSG_CALENDAR_SEND_CALENDAR (r240)
+	case 0x0448: return TEXT("CALENDAR_UPDATE_PENDING_INVITES"); // SMSG_CALENDAR_SEND_NUM_PENDING (r240)
 
 	// Player progression
 	case 0x01D0: return TEXT("COMBAT_XP_GAIN");                  // SMSG_LOG_XPGAIN
@@ -1625,10 +1798,7 @@ FString FWowEventSystem::OpcodeToEvent(uint16 Opcode)
 	case 0x02F4: return TEXT("WEATHER_CHANGED");                 // SMSG_WEATHER
 	// Note: 0x02C3 already mapped to ZONE_CHANGED above — UPDATE_WORLD_STATE fires programmatically
 
-	// Death / resurrection
-	case 0x02E7: return TEXT("PLAYER_DEAD");
-	case 0x0163: return TEXT("PLAYER_ALIVE");
-	case 0x015E: return TEXT("CORPSE_IN_RANGE");
+	// Death / resurrection events come from AWowGameplayController::UpdateDeathState.
 
 	default:
 		return FString();

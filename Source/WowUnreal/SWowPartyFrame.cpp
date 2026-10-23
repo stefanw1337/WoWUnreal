@@ -21,10 +21,10 @@ void SWowPartyFrame::Construct(const FArguments& InArgs)
     ChildSlot
     [
         SNew(SBorder)
+        .Visibility(this, &SWowPartyFrame::GetMemberVisibility)
         .BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
         .BorderBackgroundColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.8f))
         .Padding(8.0f)
-        .Visibility(this, &SWowPartyFrame::GetMemberVisibility)
         [
             SAssignNew(MembersContainer, SVerticalBox)
         ]

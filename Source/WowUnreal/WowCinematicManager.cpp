@@ -1,4 +1,5 @@
 #include "WowCinematicManager.h"
+#include "WowLocale.h"
 #include "Mpq/MpqManager.h"
 #include "MediaPlayer.h"
 #include "MediaTexture.h"
@@ -67,16 +68,16 @@ bool FWowCinematicManager::PrepareCinematic(FMpqManager* Mpq, EWowExpansion Expa
         return false;
     }
 
-    // Try multiple paths: locale-specific (enUS) and generic
+    // Try multiple paths: selected locale and generic
     TArray<FString> SearchPaths;
     FString Filename = GetCinematicFilename(Expansion);
 
     // Locale paths first (most common location)
-    SearchPaths.Add(DataPath / TEXT("enUS") / TEXT("Interface") / TEXT("Cinematics") / Filename);
+    SearchPaths.Add(DataPath / WowLocale::Get() / TEXT("Interface") / TEXT("Cinematics") / Filename);
     SearchPaths.Add(DataPath / TEXT("Interface") / TEXT("Cinematics") / Filename);
     // Also try 1024 variant
     FString Filename1024 = Filename.Replace(TEXT("_800"), TEXT("_1024"));
-    SearchPaths.Add(DataPath / TEXT("enUS") / TEXT("Interface") / TEXT("Cinematics") / Filename1024);
+    SearchPaths.Add(DataPath / WowLocale::Get() / TEXT("Interface") / TEXT("Cinematics") / Filename1024);
     SearchPaths.Add(DataPath / TEXT("Interface") / TEXT("Cinematics") / Filename1024);
 
     for (const FString& Path : SearchPaths)

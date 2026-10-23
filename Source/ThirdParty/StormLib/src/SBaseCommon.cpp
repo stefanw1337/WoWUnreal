@@ -154,18 +154,14 @@ void StringCreatePseudoFileName(char * szBuffer, size_t cchMaxChars, unsigned in
 #ifdef _UNICODE
 void StringCopy(TCHAR * szTarget, size_t cchTarget, const char * szSource)
 {
-    int ccResult;
-
-    ccResult = MultiByteToWideChar(CP_UTF8, 0, szSource, -1, szTarget, (int)(cchTarget));
-    szTarget[ccResult] = 0;
+    // MultiByteToWideChar with cbMultiByte = -1 puts terminating zero to the target buffer
+    MultiByteToWideChar(CP_UTF8, 0, szSource, -1, szTarget, (int)(cchTarget));
 }
 
 void StringCopy(char * szTarget, size_t cchTarget, const TCHAR * szSource)
 {
-    int ccResult;
-
-    ccResult = WideCharToMultiByte(CP_UTF8, 0, szSource, -1, szTarget, (int)(cchTarget), NULL, NULL);
-    szTarget[ccResult] = 0;
+    // WideCharToMultiByte with cchWideChar = -1 puts terminating zero to the target buffer
+    WideCharToMultiByte(CP_UTF8, 0, szSource, -1, szTarget, (int)(cchTarget), NULL, NULL);
 }
 
 void StringCopy(TCHAR * szTarget, size_t cchTarget, const TCHAR * szSource)
@@ -1769,7 +1765,7 @@ bool IsValidSignature(LPBYTE pbSignature)
 
 bool VerifyDataBlockHash(void * pvDataBlock, DWORD cbDataBlock, LPBYTE expected_md5)
 {
-    hash_state md5_state;
+    hash_state md5_ctx;
     BYTE md5_digest[MD5_DIGEST_SIZE];
     bool bResult = true;
 
@@ -1777,9 +1773,9 @@ bool VerifyDataBlockHash(void * pvDataBlock, DWORD cbDataBlock, LPBYTE expected_
     if(IsValidMD5(expected_md5))
     {
         // Calculate the MD5 of the data block
-        md5_init(&md5_state);
-        md5_process(&md5_state, (unsigned char *)pvDataBlock, cbDataBlock);
-        md5_done(&md5_state, md5_digest);
+        md5_init(&md5_ctx);
+        md5_process(&md5_ctx, (unsigned char *)pvDataBlock, cbDataBlock);
+        md5_done(&md5_ctx, md5_digest);
 
         // Does the MD5's match?
         bResult = (memcmp(md5_digest, expected_md5, MD5_DIGEST_SIZE) == 0);
@@ -1790,11 +1786,11 @@ bool VerifyDataBlockHash(void * pvDataBlock, DWORD cbDataBlock, LPBYTE expected_
 
 void CalculateDataBlockHash(void * pvDataBlock, DWORD cbDataBlock, LPBYTE md5_hash)
 {
-    hash_state md5_state;
+    hash_state md5_ctx;
 
-    md5_init(&md5_state);
-    md5_process(&md5_state, (unsigned char *)pvDataBlock, cbDataBlock);
-    md5_done(&md5_state, md5_hash);
+    md5_init(&md5_ctx);
+    md5_process(&md5_ctx, (unsigned char *)pvDataBlock, cbDataBlock);
+    md5_done(&md5_ctx, md5_hash);
 }
 
 //-----------------------------------------------------------------------------
@@ -1904,6 +1900,10 @@ bool DereferenceArchive(TMPQArchive * ha)
     // There must be at least one reference
     if(ha == NULL || ha->dwRefCount == 0)
         return false;
+
+    // Dereference the parent archive, if any
+    if(ha->haParent != NULL)
+        DereferenceArchive(ha->haParent);
 
     // Decrement the file count
     ha->dwRefCount--;

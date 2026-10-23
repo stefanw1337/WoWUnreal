@@ -15,6 +15,18 @@ static const char* WOW_CONTEXT_KEY = "WowLuaContext";
 
 const char* WowLuaApi::FRAME_METATABLE = "WowFrame";
 
+// r328: real quest-log API (LuaQuestLogApi.cpp). Declared here, not in the header, so adding it
+// does not rebuild every file that includes LuaApiRegistry.h.
+namespace WowLuaApi { void RegisterQuestLogApi(lua_State* L); }
+// r340: reputation API (LuaReputationApi.cpp), declared here for the same reason.
+namespace WowLuaApi { void RegisterReputationApi(lua_State* L); }
+// r341: skill API for the stock SkillFrame (LuaSkillApi.cpp).
+namespace WowLuaApi { void RegisterSkillApi(lua_State* L); }
+// r342: achievement API for the stock Blizzard_AchievementUI (LuaAchievementApi.cpp).
+namespace WowLuaApi { void RegisterAchievementApi(lua_State* L); }
+// r354: barber shop API for the stock Blizzard_BarberShopUI (LuaBarberShopApi.cpp).
+namespace WowLuaApi { void RegisterBarberShopApi(lua_State* L); }
+
 void WowLuaApi::RegisterAll(lua_State* L)
 {
 #if HAS_LUA
@@ -22,6 +34,21 @@ void WowLuaApi::RegisterAll(lua_State* L)
     RegisterGlobals(L);
     RegisterStubs(L);
     RegisterFrameApi(L);
+    RegisterChatApi(L);
+    RegisterDeathApi(L);
+    RegisterAuctionApi(L);
+    RegisterMacroApi(L);
+    RegisterGameActionsApi(L);
+    RegisterNpcDialogApi(L);
+    RegisterGuildBankApi(L);
+    // After RegisterStubs: replaces the old quest-log stubs ("Quest 123", level 1).
+    RegisterQuestLogApi(L);
+    RegisterReputationApi(L);
+    RegisterSkillApi(L);   // after RegisterQuestLogApi: chains onto its __WowWatchFrameTick
+    RegisterAchievementApi(L);   // replaces the GetAchievementInfo stub (RegisterStubs)
+    RegisterBarberShopApi(L);   // before RegisterPlaceholderApi (its ApplyBarberShopStyle ... placeholders)
+    RegisterAddonCompat(L);
+    RegisterPlaceholderApi(L);
 #endif
 }
 

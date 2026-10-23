@@ -135,7 +135,7 @@ namespace UnitField
     inline constexpr uint16 FACTIONTEMPLATE      = BASE + 0x0031;
     inline constexpr uint16 FLAGS                = BASE + 0x0035;
     inline constexpr uint16 FLAGS_2              = BASE + 0x0036;
-    inline constexpr uint16 NPC_FLAGS            = BASE + 0x0037;
+    inline constexpr uint16 NPC_FLAGS            = BASE + 0x004C; // UNIT_NPC_FLAGS (0x37 is UNIT_FIELD_AURASTATE)
     inline constexpr uint16 DISPLAYID            = BASE + 0x003D;
     inline constexpr uint16 NATIVEDISPLAYID      = BASE + 0x003E;
     inline constexpr uint16 MOUNTDISPLAYID       = BASE + 0x003F;
@@ -155,6 +155,8 @@ namespace UnitField
 
     inline constexpr uint16 BYTES_2              = BASE + 0x0074; // byte0=SheathState, byte1=PvpFlags, byte2=PetFlags, byte3=ShapeshiftForm
 
+    inline constexpr uint16 AURA_STATE = BASE + 0x0037;
+    inline constexpr uint16 BASE_MANA = BASE + 0x0072;
     // Attack Power
     inline constexpr uint16 ATTACK_POWER         = BASE + 0x0075;
     inline constexpr uint16 RANGED_ATTACK_POWER  = BASE + 0x0078;
@@ -170,8 +172,20 @@ namespace PlayerField
     inline constexpr uint16 FLAGS         = BASE + 0x0002;
     inline constexpr uint16 BYTES         = BASE + 0x0005;
     inline constexpr uint16 BYTES_2       = BASE + 0x0006;
+
+    // The 3.3.5a quest log has 25 slots. Each slot occupies five uint32 fields:
+    // quest ID, state, four packed uint16 objective counters, and timer.
+    inline constexpr uint16 QUEST_LOG_START = BASE + 0x000A;
+    inline constexpr uint16 QUEST_LOG_FIELDS_PER_SLOT = 5;
+    inline constexpr uint16 QUEST_LOG_SLOT_COUNT = 25;
+    inline constexpr uint16 QUEST_LOG_END =
+        QUEST_LOG_START + QUEST_LOG_FIELDS_PER_SLOT * QUEST_LOG_SLOT_COUNT - 1;
+
     inline constexpr uint16 XP            = BASE + 0x01E6;
     inline constexpr uint16 NEXT_LEVEL_XP = BASE + 0x01E7;
+    inline constexpr uint16 BUYBACK_SLOT_START = BASE + 0x0144; // 12 GUIDs
+    inline constexpr uint16 BUYBACK_PRICE_START = BASE + 0x041D; // 12 copper prices
+    inline constexpr uint16 BUYBACK_TIME_START = BASE + 0x0429; // 12 timestamps
     inline constexpr uint16 COINAGE       = BASE + 0x03FE;
 
     // Combat ratings (crit, hit, haste, etc.) - 25 values starting at offset from UNIT_END

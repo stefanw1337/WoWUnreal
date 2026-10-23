@@ -1,4 +1,7 @@
 #include "SWowSpellbook.h"
+#include "WowColor.h"
+#include "WowWindowStyle.h"
+#include "WowSpellPresentation.h"
 #include "WowConnectionManager.h"
 #include "WowPacketHandler.h"
 #include "Widgets/Layout/SBorder.h"
@@ -22,8 +25,7 @@ void SWowSpellbook::Construct(const FArguments& InArgs)
 
 	// Create the main spellbook content
 	SpellbookContent =
-		SNew(SBorder)
-		.BorderImage(FCoreStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+		SNew(SWowWindowFrame)
 		.Padding(5)
 		[
 			SNew(SBox)
@@ -43,12 +45,12 @@ void SWowSpellbook::Construct(const FArguments& InArgs)
 					[
 						SNew(STextBlock)
 						.Text(FText::FromString(TEXT("Known Spells")))
-						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
+						.Font(FWowWindowStyle::TitleFont())
 					]
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
 					[
-						SNew(SButton)
+						SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
 						.Text(FText::FromString(TEXT("X")))
 						.OnClicked(this, &SWowSpellbook::OnCloseButtonClicked)
 					]
@@ -58,7 +60,7 @@ void SWowSpellbook::Construct(const FArguments& InArgs)
 				+ SVerticalBox::Slot()
 				.FillHeight(1.0f)
 				[
-					SAssignNew(SpellListScrollBox, SScrollBox)
+					SAssignNew(SpellListScrollBox, SScrollBox).ConsumeMouseWheel(EConsumeMouseWheel::Always)
 					.Orientation(Orient_Vertical)
 					.ScrollBarAlwaysVisible(true)
 				]
@@ -138,7 +140,7 @@ TSharedRef<SWidget> SWowSpellbook::CreateSpellRowWidget(uint32 SpellId)
 	return SNew(SButton)
 		.ButtonStyle(FCoreStyle::Get(), "NoBorder")
 		.OnClicked(this, &SWowSpellbook::OnSpellRowClicked, SpellId)
-		.ToolTipText(FText::FromString(SpellEntry && !SpellEntry->Description.IsEmpty() ? SpellEntry->Description : SpellName))
+		.ToolTipText(FText::FromString(SpellEntry ? FWowSpellPresentation::Tooltip(nullptr,SpellEntry->ID) : SpellName))
 		[
 			SNew(SBorder)
 			.BorderImage(FCoreStyle::Get().GetBrush("ToolPanel.DarkGroupBorder"))
@@ -181,7 +183,7 @@ TSharedRef<SWidget> SWowSpellbook::CreateSpellRowWidget(uint32 SpellId)
 						SNew(STextBlock)
 						.Text(FText::FromString(SpellRank))
 						.Font(FCoreStyle::GetDefaultFontStyle("Regular", 8))
-						.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.0f))
+						.ColorAndOpacity(WowColor::FromWow(0.7f, 0.7f, 0.7f, 1.0f))
 						.Visibility(SpellRank.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible)
 					]
 				]
@@ -194,7 +196,7 @@ TSharedRef<SWidget> SWowSpellbook::CreateSpellRowWidget(uint32 SpellId)
 					SNew(STextBlock)
 					.Text(FText::FromString(FString::Printf(TEXT("Lv %d"), SpellLevel)))
 					.Font(FCoreStyle::GetDefaultFontStyle("Regular", 9))
-					.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
+					.ColorAndOpacity(WowColor::FromWow(0.8f, 0.8f, 0.8f, 1.0f))
 					.Visibility(SpellLevel > 0 ? EVisibility::Visible : EVisibility::Collapsed)
 				]
 			]
@@ -228,13 +230,13 @@ FLinearColor SWowSpellbook::GetSpellSchoolColor(uint32 SchoolMask) const
 {
 	// WoW spell school colors
 	if (SchoolMask & 0x02) return FLinearColor(1.0f, 1.0f, 0.0f, 1.0f); // Holy (yellow)
-	if (SchoolMask & 0x04) return FLinearColor(1.0f, 0.5f, 0.0f, 1.0f); // Fire (orange)
-	if (SchoolMask & 0x08) return FLinearColor(0.5f, 1.0f, 0.5f, 1.0f); // Nature (green)
-	if (SchoolMask & 0x10) return FLinearColor(0.5f, 0.5f, 1.0f, 1.0f); // Frost (blue)
-	if (SchoolMask & 0x20) return FLinearColor(0.5f, 0.0f, 1.0f, 1.0f); // Shadow (purple)
+	if (SchoolMask & 0x04) return WowColor::FromWow(1.0f, 0.5f, 0.0f, 1.0f); // Fire (orange)
+	if (SchoolMask & 0x08) return WowColor::FromWow(0.5f, 1.0f, 0.5f, 1.0f); // Nature (green)
+	if (SchoolMask & 0x10) return WowColor::FromWow(0.5f, 0.5f, 1.0f, 1.0f); // Frost (blue)
+	if (SchoolMask & 0x20) return WowColor::FromWow(0.5f, 0.0f, 1.0f, 1.0f); // Shadow (purple)
 	if (SchoolMask & 0x40) return FLinearColor(1.0f, 0.0f, 1.0f, 1.0f); // Arcane (pink)
 
-	return FLinearColor(0.8f, 0.8f, 0.8f, 1.0f); // Physical/Unknown (gray)
+	return WowColor::FromWow(0.8f, 0.8f, 0.8f, 1.0f); // Physical/Unknown (gray)
 }
 
 FString SWowSpellbook::FormatSpellRank(const FSpellDbcEntry* SpellEntry) const

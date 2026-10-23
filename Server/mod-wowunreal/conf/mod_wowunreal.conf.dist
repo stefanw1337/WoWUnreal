@@ -1,0 +1,53 @@
+[worldserver]
+
+########################################
+# mod-wowunreal configuration
+########################################
+#
+#    WowUnreal.Enable
+#        Description: Enable the WowUnreal client handshake and features.
+#        Default:     1
+#
+WowUnreal.Enable = 1
+
+#
+#    WowUnreal.RequireClient
+#        Description: Kick sessions that do not complete a valid WowUnreal handshake.
+#        Default:     0 - stock 3.3.5 clients may play
+#
+WowUnreal.RequireClient = 0
+
+#
+#    WowUnreal.HandshakeTimeout
+#        Description: Seconds after login before a session without a valid handshake is kicked
+#                     (only with RequireClient = 1).
+#        Default:     15
+#
+WowUnreal.HandshakeTimeout = 15
+
+#
+#    WowUnreal.ReleaseSecrets
+#        Description: Comma separated hex secrets of the client releases you accept. Empty = any
+#                     client that speaks the handshake is accepted (development only).
+#                     WowUnreal client release 1 (r259):
+#                     617ebc50c3b63536035134ee24f49c25af248c086d5a0fc27495eef575ac3f35
+#        Default:     ""
+#
+WowUnreal.ReleaseSecrets = ""
+
+#
+#    WowUnreal.FirstPersonLock / WaveDrift / VrAllowed
+#        Description: Client features this realm allows or enforces (sent in CAPS).
+#
+WowUnreal.FirstPersonLock = 0
+WowUnreal.WaveDrift = 0
+WowUnreal.VrAllowed = 1
+
+#
+#    WowUnreal.WeatherGameplay
+#        Description: Server-side weather effects (slow in wind/blizzard, ember damage in ash).
+#                     Not implemented yet; the flag is already sent to the client.
+#
+WowUnreal.WeatherGameplay = 0
+WowUnreal.WeatherSlowMax = 20
+WowUnreal.AshEmberDamage = 1

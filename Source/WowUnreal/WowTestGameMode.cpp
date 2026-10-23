@@ -128,9 +128,6 @@ void AWowTestGameMode::SetupTestScene(UWorld* World, AWowWorldManager* WorldMana
         // Sky manager provides sun directional light + sky atmosphere + sky light
         SpawnSkyManager(World);
 
-        // Also add an explicit directional light for guaranteed illumination
-        SpawnDirectionalLight(World);
-
         // Large ground plane so nothing floats in the void
         SpawnGroundPlane(World, FVector(200.0f, 0.0f, -5.0f), 60.0f);
 
@@ -269,6 +266,18 @@ void AWowTestGameMode::SetupPostProcess(UWorld* World)
         PreExpCVar->Set(1.0f);
     }
 
+    const auto SetCVar = [](const TCHAR* Name, int32 Value)
+    {
+        if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(Name))
+        {
+            CVar->Set(Value);
+        }
+    };
+    SetCVar(TEXT("r.DefaultFeature.MotionBlur"), 0);
+    SetCVar(TEXT("r.MotionBlurQuality"), 0);
+    SetCVar(TEXT("r.DefaultFeature.DepthOfField"), 0);
+    SetCVar(TEXT("r.DepthOfFieldQuality"), 0);
+
     APostProcessVolume* PPV = World->SpawnActor<APostProcessVolume>();
     if (PPV)
     {
@@ -325,10 +334,13 @@ void AWowTestGameMode::SpawnDirectionalLight(UWorld* World)
 {
     ADirectionalLight* Sun = World->SpawnActor<ADirectionalLight>(
         ADirectionalLight::StaticClass(), FTransform(FRotator(-45.0f, 30.0f, 0.0f), FVector::ZeroVector));
-    if (Sun)
+    if (UDirectionalLightComponent* LightComponent = Sun
+        ? Cast<UDirectionalLightComponent>(Sun->GetLightComponent())
+        : nullptr)
     {
-        Sun->GetLightComponent()->SetIntensity(3.14159f);
-        Sun->GetLightComponent()->SetLightColor(FLinearColor(1.0f, 0.95f, 0.85f));
+        LightComponent->SetIntensity(3.14159f);
+        LightComponent->SetLightColor(FLinearColor(1.0f, 0.95f, 0.85f));
+        LightComponent->SetForwardShadingPriority(0);
     }
 }
 

@@ -1,4 +1,5 @@
 #include "SWowChatWindow.h"
+#include "Formats/Dbc/DbcStore.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
@@ -287,6 +288,11 @@ void SWowChatWindow::SendChatMessage()
     // Handle emotes separately
     if (Command.Type == -1)
     {
+        if (Command.Message == TEXT("stand"))
+        {
+            ConnectionManager->SendStandStateChange(0);
+            return;
+        }
         // This is an emote command
         int32 EmoteTextId = GetEmoteTextIdForCommand(Command.Message);
         if (EmoteTextId > 0)
@@ -415,60 +421,13 @@ SWowChatWindow::FChatCommand SWowChatWindow::ParseChatCommand(const FString& Inp
 
 bool SWowChatWindow::IsEmoteCommand(const FString& Command) const
 {
-    // List of supported emote commands
-    static const TArray<FString> EmoteCommands = {
-        TEXT("dance"), TEXT("wave"), TEXT("bow"), TEXT("sit"), TEXT("stand"), TEXT("kneel"),
-        TEXT("sleep"), TEXT("talk"), TEXT("eat"), TEXT("cry"), TEXT("laugh"), TEXT("cheer"),
-        TEXT("roar"), TEXT("salute"), TEXT("chicken"), TEXT("clap"), TEXT("flex"), TEXT("shy"),
-        TEXT("rude"), TEXT("point"), TEXT("kiss"), TEXT("hug"), TEXT("nod"), TEXT("no"),
-        TEXT("hello"), TEXT("goodbye"), TEXT("yes"), TEXT("work"), TEXT("pray"), TEXT("ready"),
-        TEXT("bored"), TEXT("applaud"), TEXT("thank"), TEXT("welcome"), TEXT("congratulate")
-    };
-
-    return EmoteCommands.Contains(Command);
+    return Command == TEXT("stand") || FDbcStore::Get().EmotesText().GetByCommand(Command) != nullptr;
 }
 
 int32 SWowChatWindow::GetEmoteTextIdForCommand(const FString& Command) const
 {
-    // Map slash commands to EmotesText.dbc IDs
-    // Reference: https://wowdev.wiki/EmotesText.dbc
-    if (Command == TEXT("dance")) return 10;
-    if (Command == TEXT("wave")) return 21;
-    if (Command == TEXT("bow")) return 2;
-    if (Command == TEXT("sit")) return 19; // Sit emote
-    if (Command == TEXT("stand")) return 20; // Stand emote
-    if (Command == TEXT("kneel")) return 68;
-    if (Command == TEXT("sleep")) return 16;
-    if (Command == TEXT("talk")) return 83;
-    if (Command == TEXT("eat")) return 6;
-    if (Command == TEXT("cry")) return 5;
-    if (Command == TEXT("laugh")) return 11;
-    if (Command == TEXT("cheer")) return 4;
-    if (Command == TEXT("roar")) return 15;
-    if (Command == TEXT("salute")) return 17;
-    if (Command == TEXT("chicken")) return 3;
-    if (Command == TEXT("clap")) return 84; // Applaud
-    if (Command == TEXT("flex")) return 91;
-    if (Command == TEXT("shy")) return 18;
-    if (Command == TEXT("rude")) return 14; // Rude
-    if (Command == TEXT("point")) return 13;
-    if (Command == TEXT("kiss")) return 9;
-    if (Command == TEXT("hug")) return 8;
-    if (Command == TEXT("nod")) return 12; // Nod / Yes
-    if (Command == TEXT("no")) return 37; // No
-    if (Command == TEXT("hello")) return 7;
-    if (Command == TEXT("goodbye")) return 36;
-    if (Command == TEXT("yes")) return 12; // Same as nod
-    if (Command == TEXT("work")) return 85;
-    if (Command == TEXT("pray")) return 89;
-    if (Command == TEXT("ready")) return 22;
-    if (Command == TEXT("bored")) return 1;
-    if (Command == TEXT("applaud")) return 84;
-    if (Command == TEXT("thank")) return 81;
-    if (Command == TEXT("welcome")) return 88;
-    if (Command == TEXT("congratulate")) return 95;
-
-    return -1; // Unknown emote
+    const auto* Entry = FDbcStore::Get().EmotesText().GetByCommand(Command);
+    return Entry ? int32(Entry->ID) : -1;
 }
 
 FReply SWowChatWindow::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)

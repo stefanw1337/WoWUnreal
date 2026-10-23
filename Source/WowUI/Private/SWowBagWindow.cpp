@@ -1,11 +1,15 @@
 #include "SWowBagWindow.h"
+#include "WowWindowStyle.h"
+#include "WowItemPresentation.h"
 #include "WowInventoryManager.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
 #include "Widgets/SToolTip.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Styling/AppStyle.h"
 #include "InputCoreTypes.h"
 #include "Formats/Dbc/DbcStore.h"
 
@@ -17,34 +21,50 @@ void SWowItemSlot::Construct(const FArguments& InArgs, TSharedPtr<FWowInventoryM
     ChildSlot
     [
         SAssignNew(SlotBorder, SBorder)
-        .BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+        .BorderImage(FAppStyle::GetBrush("WhiteBrush"))
         .BorderBackgroundColor(this, &SWowItemSlot::GetSlotBorderColor)
-        .Padding(2.0f)
+        .Padding(1.0f)
         [
-            SNew(SBox)
-            .WidthOverride(40.0f)
-            .HeightOverride(40.0f)
+            SNew(SBorder)
+            .BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+            .BorderBackgroundColor(FLinearColor(0.015f, 0.014f, 0.012f, 1.0f))
+            .Padding(2.0f)
             [
-                SNew(SOverlay)
-
-                // Item background (colored by quality)
-                + SOverlay::Slot()
+                SNew(SBorder)
+                .BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+                .BorderBackgroundColor(this, &SWowItemSlot::GetItemQualityColor)
+                .Padding(0.0f)
                 [
-                    SNew(SBorder)
-                    .BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-                    .BorderBackgroundColor(this, &SWowItemSlot::GetItemQualityColor)
-                    .Padding(0)
-                ]
+                    SNew(SBox)
+                    .WidthOverride(34.0f)
+                    .HeightOverride(34.0f)
+                    [
+                        SNew(SOverlay)
 
-                // Stack count text
-                + SOverlay::Slot()
-                .HAlign(HAlign_Right)
-                .VAlign(VAlign_Bottom)
-                [
-                    SAssignNew(StackCountText, STextBlock)
-                    .Text(this, &SWowItemSlot::GetStackCountText)
-                    .ColorAndOpacity(FLinearColor::White)
-                    .Font(FAppStyle::GetFontStyle("SmallFont"))
+                        // Empty/item plate. This intentionally stays dark rather than
+                        // using a red "unable" overlay, which is reserved for action range.
+                        + SOverlay::Slot()
+                        [
+                            SNew(SBorder)
+                            .BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+                            .BorderBackgroundColor(FLinearColor(0.020f, 0.019f, 0.017f, 0.96f))
+                            .Padding(0.0f)
+                        ]
+
+                        // Stack count text
+                        + SOverlay::Slot()
+                        .HAlign(HAlign_Right)
+                        .VAlign(VAlign_Bottom)
+                        .Padding(0.0f, 0.0f, 2.0f, 0.0f)
+                        [
+                            SAssignNew(StackCountText, STextBlock)
+                            .Text(this, &SWowItemSlot::GetStackCountText)
+                            .ColorAndOpacity(FLinearColor(1.0f, 0.93f, 0.68f, 1.0f))
+                            .ShadowOffset(FVector2D(1.0f))
+                            .ShadowColorAndOpacity(FLinearColor::Black)
+                            .Font(FAppStyle::GetFontStyle("SmallFont"))
+                        ]
+                    ]
                 ]
             ]
         ]
@@ -105,21 +125,29 @@ void SWowItemSlot::UpdateSlotDisplay()
 FSlateColor SWowItemSlot::GetSlotBorderColor() const
 {
     if (bIsHovered)
-        return FLinearColor::Yellow;
+    {
+        return FLinearColor(0.95f, 0.74f, 0.30f, 1.0f);
+    }
 
-    return FLinearColor(1.0f, 0.84f, 0.0f); // Gold border
+    return FLinearColor(0.22f, 0.22f, 0.20f, 0.95f);
 }
 
 FSlateColor SWowItemSlot::GetItemQualityColor() const
 {
     if (!InventoryManager.IsValid())
-        return FLinearColor::Gray;
+    {
+        return FLinearColor(0.025f, 0.024f, 0.022f, 0.96f);
+    }
 
     const FWowItemSlot* ItemSlot = InventoryManager->GetBackpackItem(SlotIndex);
     if (!ItemSlot || ItemSlot->IsEmpty())
-        return FLinearColor(0.2f, 0.2f, 0.2f); // Dark background for empty slot
+    {
+        return FLinearColor(0.025f, 0.024f, 0.022f, 0.96f);
+    }
 
-    return FWowInventoryManager::GetQualityColor(ItemSlot->Quality);
+    FLinearColor QualityColor = FWowInventoryManager::GetQualityColor(ItemSlot->Quality);
+    QualityColor.A = 1.0f;
+    return QualityColor * 0.32f + FLinearColor(0.025f, 0.024f, 0.022f, 1.0f) * 0.68f;
 }
 
 FText SWowItemSlot::GetStackCountText() const
@@ -141,78 +169,7 @@ TSharedPtr<SToolTip> SWowItemSlot::CreateItemTooltip(const FWowItemSlot* ItemSlo
         return nullptr;
     }
 
-    // Get item display info from DBC if available (note: ItemDisplayInfo doesn't contain names)
-    FString ItemName;
-    // TODO: Look up item name from Item.dbc or server query cache when available
-    // For now, ItemDisplayInfo.dbc only contains display information, not names
-
-    // Fallback to Item #ID if no name found
-    if (ItemName.IsEmpty())
-    {
-        ItemName = FString::Printf(TEXT("Item #%u"), ItemSlot->ItemEntry);
-    }
-
-    // Get quality color
-    FLinearColor QualityColor = FWowInventoryManager::GetQualityColor(ItemSlot->Quality);
-
-    return SNew(SToolTip)
-    [
-        SNew(SBorder)
-        .BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder"))
-        .BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.05f, 0.95f))
-        .Padding(8.0f)
-        [
-            SNew(SVerticalBox)
-
-            // Item name with quality color
-            + SVerticalBox::Slot()
-            .AutoHeight()
-            [
-                SNew(STextBlock)
-                .Text(FText::FromString(ItemName))
-                .ColorAndOpacity(QualityColor)
-                .Font(FAppStyle::GetFontStyle("NormalFont"))
-                .Justification(ETextJustify::Left)
-            ]
-
-            // Item ID
-            + SVerticalBox::Slot()
-            .AutoHeight()
-            .Padding(0, 2, 0, 0)
-            [
-                SNew(STextBlock)
-                .Text(FText::FromString(FString::Printf(TEXT("Item ID: %u"), ItemSlot->ItemEntry)))
-                .ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
-                .Font(FAppStyle::GetFontStyle("SmallFont"))
-            ]
-
-            // Stack count (if > 1)
-            + SVerticalBox::Slot()
-            .AutoHeight()
-            .Padding(0, 2, 0, 0)
-            [
-                SNew(STextBlock)
-                .Text(ItemSlot->StackCount > 1 ?
-                    FText::FromString(FString::Printf(TEXT("Count: %u"), ItemSlot->StackCount)) :
-                    FText::GetEmpty())
-                .ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
-                .Font(FAppStyle::GetFontStyle("SmallFont"))
-                .Visibility(ItemSlot->StackCount > 1 ? EVisibility::Visible : EVisibility::Collapsed)
-            ]
-
-            // Usage hint
-            + SVerticalBox::Slot()
-            .AutoHeight()
-            .Padding(0, 4, 0, 0)
-            [
-                SNew(STextBlock)
-                .Text(FText::FromString(TEXT("Right-click to use")))
-                .ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.0f))
-                .Font(FAppStyle::GetFontStyle("SmallFont"))
-                .Justification(ETextJustify::Left)
-            ]
-        ]
-    ];
+    return FWowItemPresentation::Tooltip(InventoryManager->GetConnectionManager(), ItemSlot->ItemEntry);
 }
 
 void SWowBagWindow::Construct(const FArguments& InArgs, TSharedPtr<FWowInventoryManager> InInventoryManager)
@@ -233,6 +190,7 @@ void SWowBagWindow::Construct(const FArguments& InArgs, TSharedPtr<FWowInventory
 
             TSharedPtr<SWowItemSlot> ItemSlot;
             ItemGrid->AddSlot(Col, Row)
+            .Padding(FMargin(1.0f))
             [
                 SAssignNew(ItemSlot, SWowItemSlot, InventoryManager)
                 .SlotIndex(SlotIndex)
@@ -244,22 +202,22 @@ void SWowBagWindow::Construct(const FArguments& InArgs, TSharedPtr<FWowInventory
 
     ChildSlot
     [
-        SNew(SBorder)
-        .BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder"))
-        .BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.05f, 0.9f))
-        .Padding(8.0f)
+        SNew(SWowWindowFrame)
+        .Padding(6.0f)
         [
             SNew(SVerticalBox)
 
             // Title bar
             + SVerticalBox::Slot()
             .AutoHeight()
-            .Padding(0, 0, 0, 5)
+            .Padding(0, 0, 0, 4)
             [
                 SNew(STextBlock)
                 .Text(NSLOCTEXT("WowUI", "BackpackTitle", "Backpack"))
-                .Font(FAppStyle::GetFontStyle("NormalFont"))
-                .ColorAndOpacity(FLinearColor::White)
+                .Font(FAppStyle::GetFontStyle("SmallFont"))
+                .ColorAndOpacity(FLinearColor(1.0f, 0.82f, 0.0f, 1.0f))
+                .ShadowOffset(FVector2D(1.0f))
+                .ShadowColorAndOpacity(FLinearColor::Black)
                 .Justification(ETextJustify::Center)
             ]
 
@@ -275,7 +233,7 @@ void SWowBagWindow::Construct(const FArguments& InArgs, TSharedPtr<FWowInventory
     // Bind to inventory changes
     if (InventoryManager.IsValid())
     {
-        InventoryManager->OnInventoryChanged.AddRaw(this, &SWowBagWindow::OnInventoryChanged);
+        InventoryManager->OnInventoryChanged.AddSP(this, &SWowBagWindow::OnInventoryChanged);
     }
 
     SetBagVisibility(EVisibility::Hidden);
@@ -291,7 +249,7 @@ void SWowBagWindow::ToggleVisibility()
 {
     if (CurrentVisibility == EVisibility::Hidden)
     {
-        SetBagVisibility(EVisibility::SelfHitTestInvisible);
+        SetBagVisibility(EVisibility::Visible);
     }
     else
     {

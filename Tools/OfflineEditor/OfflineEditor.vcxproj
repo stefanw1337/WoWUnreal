@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Development|x64"><Configuration>Development</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+ <PropertyGroup Label="Globals"><ProjectGuid>{38760961-1A63-5A30-BDDA-A505C50E2BB8}</ProjectGuid><Keyword>MakeFileProj</Keyword><ProjectName>OfflineEditor</ProjectName></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+ <PropertyGroup Label="Configuration"><ConfigurationType>Makefile</ConfigurationType><PlatformToolset>v143</PlatformToolset></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+ <PropertyGroup><NMakeBuildCommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)..\..\Scripts\BuildOfflineEditor.ps1&quot;</NMakeBuildCommandLine><NMakeReBuildCommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)..\..\Scripts\BuildOfflineEditor.ps1&quot;</NMakeReBuildCommandLine><NMakeCleanCommandLine>echo No shared installed files removed.</NMakeCleanCommandLine><NMakeOutput>$(ProjectDir)..\..\PrivateTools\OfflineCharacterEditor\WowOfflineEditor.exe</NMakeOutput><LocalDebuggerCommand>$(NMakeOutput)</LocalDebuggerCommand><DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor><OutDir>$(ProjectDir)..\..\Intermediate\DesktopPrograms\OfflineEditor\</OutDir><IntDir>$(OutDir)</IntDir></PropertyGroup>
+ <ItemGroup><None Include="editor.py" /><None Include="data.py" /><None Include="surfaces.py" /></ItemGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

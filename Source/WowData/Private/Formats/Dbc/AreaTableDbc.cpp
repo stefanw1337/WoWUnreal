@@ -19,7 +19,7 @@ bool FAreaTableDbc::Load(const FDbcParser& Parser)
         E.ZoneMusicID  = Parser.GetUInt(i, 8);
         E.IntroMusicID = Parser.GetUInt(i, 9);
         E.AreaLevel    = static_cast<int32>(Parser.GetUInt(i, 10));
-        E.Name         = Parser.GetString(i, 11);
+        E.Name         = Parser.GetLocalizedString(i, 11);
         E.Team         = Parser.GetUInt(i, 28);
         IdIndex.Add(E.ID, Entries.Num());
         Entries.Add(MoveTemp(E));

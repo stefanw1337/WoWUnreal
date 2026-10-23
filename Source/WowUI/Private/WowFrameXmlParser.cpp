@@ -472,6 +472,47 @@ static FWowTextureElement ParseTextureNode(const FXmlNode* Node)
 	return Tex;
 }
 
+// Virtual <Texture> templates usable by button state textures, by name.
+static TMap<FString, TPair<FString, FVector4>>& WowVirtualButtonTextures()
+{
+	static TMap<FString, TPair<FString, FVector4>> Textures;
+	return Textures;
+}
+
+#if HAS_PUGIXML
+// r379: a button state texture's <Size> and first <Anchor> (point, relative point, offset).
+static void ReadButtonTextureLayout(const pugi::xml_node& Node, FWowFrameDef& Def)
+{
+	if (const pugi::xml_node Size = Node.child("Size"))
+	{
+		const pugi::xml_node Abs = Size.child("AbsDimension");
+		Def.NormalTextureW = (Abs ? Abs : Size).attribute("x").as_float(0.0f);
+		Def.NormalTextureH = (Abs ? Abs : Size).attribute("y").as_float(0.0f);
+	}
+	if (const pugi::xml_node Anchor = Node.child("Anchors").child("Anchor"))
+	{
+		Def.NormalTexturePoint = FWowFrameXmlParser::ParseAnchorPoint(UTF8_TO_TCHAR(Anchor.attribute("point").as_string("CENTER")));
+		const char* Rel = Anchor.attribute("relativePoint").as_string("");
+		Def.NormalTextureRelativePoint = Rel[0] ? FWowFrameXmlParser::ParseAnchorPoint(UTF8_TO_TCHAR(Rel)) : Def.NormalTexturePoint;
+		const pugi::xml_node Offset = Anchor.child("Offset");
+		const pugi::xml_node OffsetAbs = Offset ? Offset.child("AbsDimension") : Anchor.child("AbsDimension");
+		const pugi::xml_node OffsetNode = OffsetAbs ? OffsetAbs : Offset;
+		if (OffsetNode) Def.NormalTextureOffset = FVector2D(OffsetNode.attribute("x").as_float(0.0f), OffsetNode.attribute("y").as_float(0.0f));
+	}
+}
+static void ResolveVirtualButtonTexture(const pugi::xml_node& Node, FString& File, FVector4& UV)
+{
+	if (!File.IsEmpty()) return;
+	const FString Inherits = UTF8_TO_TCHAR(Node.attribute("inherits").as_string());
+	if (Inherits.IsEmpty()) return;
+	if (const TPair<FString, FVector4>* Found = WowVirtualButtonTextures().Find(Inherits))
+	{
+		File = Found->Key;
+		if (!Node.child("TexCoords")) UV = Found->Value;
+	}
+}
+#endif
+
 // ─── Helper: parse FontString element ──────────────────────────────────────────
 
 static FWowFontStringElement ParseFontStringNode(const FXmlNode* Node)
@@ -484,7 +525,7 @@ static FWowFontStringElement ParseFontStringNode(const FXmlNode* Node)
 
 	FString JH = Node->GetAttribute(TEXT("justifyH"));
 	FString JV = Node->GetAttribute(TEXT("justifyV"));
-	if (!JH.IsEmpty()) FS.JustifyH = JH;
+	FS.JustifyH = JH; // empty: the font object decides (see FWowFrameManager, CreateLayerContent)
 	if (!JV.IsEmpty()) FS.JustifyV = JV;
 
 	// Size
@@ -500,6 +541,7 @@ static FWowFontStringElement ParseFontStringNode(const FXmlNode* Node)
 	if (ColorNode)
 	{
 		FS.Color = ParseColor(ColorNode);
+		FS.bHasColor = true;
 	}
 
 	// FontHeight
@@ -510,7 +552,7 @@ static FWowFontStringElement ParseFontStringNode(const FXmlNode* Node)
 		if (AbsVal)
 		{
 			FString Val = AbsVal->GetAttribute(TEXT("val"));
-			if (!Val.IsEmpty()) FS.FontHeight = FCString::Atof(*Val);
+			if (!Val.IsEmpty()) { FS.FontHeight = FCString::Atof(*Val); FS.bHasFontHeight = true; }
 		}
 	}
 
@@ -716,6 +758,11 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 	Def.bSetAllPoints = Node.attribute("setAllPoints").as_bool(false);
 	Def.bEnableMouse = Node.attribute("enableMouse").as_bool(false);
 	Def.bEnableKeyboard = Node.attribute("enableKeyboard").as_bool(false);
+	Def.bClampedToScreen = Node.attribute("clampedToScreen").as_bool(false);
+	// <Button text="CLOSE" inherits="UIPanelButtonTemplate">: the label is the global string the text
+	// attribute names (the client calls SetText with it). It was never read, so every such button was
+	// blank - Dressing Room "Close"/"Reset" (Stefan 11.10). A <ButtonText> without text keeps it.
+	Def.ButtonText = UTF8_TO_TCHAR(Node.attribute("text").as_string());
 
 	const char* Strata = Node.attribute("frameStrata").as_string("");
 	if (Strata[0]) Def.Strata = FWowFrameXmlParser::ParseStrata(UTF8_TO_TCHAR(Strata));
@@ -725,6 +772,14 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 	Def.MinValue = Node.attribute("minValue").as_float(0.0f);
 	Def.MaxValue = Node.attribute("maxValue").as_float(100.0f);
 	Def.DefaultValue = Node.attribute("defaultValue").as_float(0.0f);
+	Def.BarTexture = UTF8_TO_TCHAR(Node.child("BarTexture").attribute("file").as_string());
+	if (const auto Hit = Node.child("HitRectInsets"))
+    {
+        auto Inset = Hit.child("AbsInset");
+        if (!Inset) Inset = Hit;
+        Def.HitRectInsets = FMargin(Inset.attribute("left").as_float(),Inset.attribute("top").as_float(),
+            Inset.attribute("right").as_float(),Inset.attribute("bottom").as_float());
+    }
 	TArray<FWowTextureElement> InlineTextures;
 
 	// Parse child elements
@@ -740,6 +795,12 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 			{
 				Def.Width = AbsDim.attribute("x").as_float(0.0f);
 				Def.Height = AbsDim.attribute("y").as_float(0.0f);
+			}
+			else
+			{
+				// Short form <Size x="30" y="30"/> (MultiCastSlotButtonTemplate and most 3.x XML).
+				if (Child.attribute("x")) Def.Width = Child.attribute("x").as_float(0.0f);
+				if (Child.attribute("y")) Def.Height = Child.attribute("y").as_float(0.0f);
 			}
 		}
 		else if (Tag == TEXT("Anchors"))
@@ -812,6 +873,11 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 							{
 								T.Width = TexAbsDim.attribute("x").as_float(0.0f);
 								T.Height = TexAbsDim.attribute("y").as_float(0.0f);
+							}
+							else
+							{
+								T.Width = TexSize.attribute("x").as_float(0.0f);
+								T.Height = TexSize.attribute("y").as_float(0.0f);
 							}
 						}
 
@@ -886,7 +952,10 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 						FS.ParentKey = UTF8_TO_TCHAR(Tex.attribute("parentKey").as_string());
 						FS.Text = UTF8_TO_TCHAR(Tex.attribute("text").as_string());
 						FS.Inherits = UTF8_TO_TCHAR(Tex.attribute("inherits").as_string());
-						FS.JustifyH = UTF8_TO_TCHAR(Tex.attribute("justifyH").as_string("LEFT"));
+						// No justifyH: the font object decides (GameFontNormalLeft ... LEFT, otherwise CENTER as
+						// in the client). Defaulting to LEFT put the Dressing Room title against the left edge
+						// of its 300-unit box (Stefan 11.10).
+						FS.JustifyH = UTF8_TO_TCHAR(Tex.attribute("justifyH").as_string(""));
 
 						// Size
 						pugi::xml_node FSSize = Tex.child("Size");
@@ -897,6 +966,11 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 							{
 								FS.Width = FSAbsDim.attribute("x").as_float(0.0f);
 								FS.Height = FSAbsDim.attribute("y").as_float(0.0f);
+							}
+							else
+							{
+								FS.Width = FSSize.attribute("x").as_float(0.0f);
+								FS.Height = FSSize.attribute("y").as_float(0.0f);
 							}
 						}
 
@@ -945,7 +1019,7 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 						if (FH)
 						{
 							pugi::xml_node AbsVal = FH.child("AbsValue");
-							if (AbsVal) FS.FontHeight = AbsVal.attribute("val").as_float(12.0f);
+							if (AbsVal) { FS.FontHeight = AbsVal.attribute("val").as_float(12.0f); FS.bHasFontHeight = true; }
 						}
 						pugi::xml_node Color = Tex.child("Color");
 						if (Color)
@@ -955,12 +1029,19 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 								Color.attribute("g").as_float(1.0f),
 								Color.attribute("b").as_float(1.0f),
 								Color.attribute("a").as_float(1.0f));
+							FS.bHasColor = true;
 						}
 						L.FontStrings.Add(FS);
 					}
 				}
 				Def.Layers.Add(L);
 			}
+		}
+		else if (Tag == TEXT("Attributes"))
+		{
+			for (pugi::xml_node Attr = Child.child("Attribute"); Attr; Attr = Attr.next_sibling("Attribute"))
+				Def.XmlAttributes.Add({UTF8_TO_TCHAR(Attr.attribute("name").as_string()),
+					UTF8_TO_TCHAR(Attr.attribute("type").as_string("string")), UTF8_TO_TCHAR(Attr.attribute("value").as_string())});
 		}
 		else if (Tag == TEXT("Scripts"))
 		{
@@ -1010,10 +1091,28 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 			BD.BgFile = UTF8_TO_TCHAR(Child.attribute("bgFile").as_string());
 			BD.EdgeFile = UTF8_TO_TCHAR(Child.attribute("edgeFile").as_string());
 			BD.Tile = Child.attribute("tile").as_bool(false);
-			pugi::xml_node ES = Child.child("EdgeSize");
-			if (ES) BD.EdgeSize = ES.attribute("val").as_int(0);
-			pugi::xml_node TS = Child.child("TileSize");
-			if (TS) BD.TileSize = TS.attribute("val").as_int(0);
+			// r253 (Stefan 12.10: the Release Spirit dialog had no dialog border): FrameXML writes
+			// <EdgeSize><AbsValue val="32"/></EdgeSize> and <BackgroundInsets><AbsInset .../>; only a
+			// val attribute on EdgeSize itself was read, so XML dialog borders had size 0 and no insets.
+			auto SizeValue = [](const pugi::xml_node& Node) -> int32
+			{
+				if (!Node) return 0;
+				if (const pugi::xml_attribute Val = Node.attribute("val")) return Val.as_int(0);
+				if (const pugi::xml_node Abs = Node.child("AbsValue")) return Abs.attribute("val").as_int(0);
+				return 0;
+			};
+			if (const pugi::xml_attribute A = Child.attribute("edgeSize")) BD.EdgeSize = A.as_int(0);
+			if (const pugi::xml_attribute A = Child.attribute("tileSize")) BD.TileSize = A.as_int(0);
+			if (const int32 ES = SizeValue(Child.child("EdgeSize"))) BD.EdgeSize = ES;
+			if (const int32 TS = SizeValue(Child.child("TileSize"))) BD.TileSize = TS;
+			if (const pugi::xml_node Insets = Child.child("BackgroundInsets"))
+			{
+				const pugi::xml_node AbsInset = Insets.child("AbsInset") ? Insets.child("AbsInset") : Insets;
+				BD.InsetLeft = AbsInset.attribute("left").as_float(BD.InsetLeft);
+				BD.InsetRight = AbsInset.attribute("right").as_float(BD.InsetRight);
+				BD.InsetTop = AbsInset.attribute("top").as_float(BD.InsetTop);
+				BD.InsetBottom = AbsInset.attribute("bottom").as_float(BD.InsetBottom);
+			}
 			Def.Backdrop = BD;
 		}
 		else if (Tag == TEXT("NormalTexture"))
@@ -1021,24 +1120,49 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 			Def.NormalTexture = UTF8_TO_TCHAR(Child.attribute("file").as_string());
 			Def.NormalTextureName = UTF8_TO_TCHAR(Child.attribute("name").as_string());
 			Def.NormalTextureParentKey = UTF8_TO_TCHAR(Child.attribute("parentKey").as_string());
+            const auto UV = Child.child("TexCoords");
+            Def.NormalTextureUV = FVector4(UV.attribute("left").as_float(0), UV.attribute("right").as_float(1),
+                UV.attribute("top").as_float(0), UV.attribute("bottom").as_float(1));
+            ResolveVirtualButtonTexture(Child, Def.NormalTexture, Def.NormalTextureUV);
+            ReadButtonTextureLayout(Child, Def); // r379
 		}
 		else if (Tag == TEXT("PushedTexture"))
 		{
 			Def.PushedTexture = UTF8_TO_TCHAR(Child.attribute("file").as_string());
 			Def.PushedTextureName = UTF8_TO_TCHAR(Child.attribute("name").as_string());
 			Def.PushedTextureParentKey = UTF8_TO_TCHAR(Child.attribute("parentKey").as_string());
+            const auto UV = Child.child("TexCoords");
+            Def.PushedTextureUV = FVector4(UV.attribute("left").as_float(0), UV.attribute("right").as_float(1),
+                UV.attribute("top").as_float(0), UV.attribute("bottom").as_float(1));
+            ResolveVirtualButtonTexture(Child, Def.PushedTexture, Def.PushedTextureUV);
 		}
 		else if (Tag == TEXT("HighlightTexture"))
 		{
 			Def.HighlightTexture = UTF8_TO_TCHAR(Child.attribute("file").as_string());
 			Def.HighlightTextureName = UTF8_TO_TCHAR(Child.attribute("name").as_string());
 			Def.HighlightTextureParentKey = UTF8_TO_TCHAR(Child.attribute("parentKey").as_string());
+            const auto UV = Child.child("TexCoords");
+            Def.HighlightTextureUV = FVector4(UV.attribute("left").as_float(0), UV.attribute("right").as_float(1),
+                UV.attribute("top").as_float(0), UV.attribute("bottom").as_float(1));
+            ResolveVirtualButtonTexture(Child, Def.HighlightTexture, Def.HighlightTextureUV);
 		}
 		else if (Tag == TEXT("DisabledTexture"))
 		{
 			Def.DisabledTexture = UTF8_TO_TCHAR(Child.attribute("file").as_string());
 			Def.DisabledTextureName = UTF8_TO_TCHAR(Child.attribute("name").as_string());
 			Def.DisabledTextureParentKey = UTF8_TO_TCHAR(Child.attribute("parentKey").as_string());
+            const auto UV = Child.child("TexCoords");
+            Def.DisabledTextureUV = FVector4(UV.attribute("left").as_float(0), UV.attribute("right").as_float(1),
+                UV.attribute("top").as_float(0), UV.attribute("bottom").as_float(1));
+            ResolveVirtualButtonTexture(Child, Def.DisabledTexture, Def.DisabledTextureUV);
+		}
+		else if (Tag == TEXT("CheckedTexture"))
+		{
+			Def.CheckedTexture = UTF8_TO_TCHAR(Child.attribute("file").as_string());
+			const auto UV = Child.child("TexCoords");
+			Def.CheckedTextureUV = FVector4(UV.attribute("left").as_float(0), UV.attribute("right").as_float(1),
+				UV.attribute("top").as_float(0), UV.attribute("bottom").as_float(1));
+			ResolveVirtualButtonTexture(Child, Def.CheckedTexture, Def.CheckedTextureUV);
 		}
 		else if (Tag == TEXT("ThumbTexture"))
 		{
@@ -1096,7 +1220,11 @@ static FWowFrameDef ParseFrameNode_Pugi(const pugi::xml_node& Node)
 		else if (Tag == TEXT("ButtonText"))
 		{
 			pugi::xml_node FS = Child.child("FontString");
-			Def.ButtonText = FS ? UTF8_TO_TCHAR(FS.attribute("text").as_string()) : UTF8_TO_TCHAR(Child.child_value());
+			const FString ChildText = FS ? UTF8_TO_TCHAR(FS.attribute("text").as_string()) : UTF8_TO_TCHAR(Child.child_value());
+			if (!ChildText.TrimStartAndEnd().IsEmpty() || Def.ButtonText.IsEmpty()) Def.ButtonText = ChildText;
+			// <ButtonText name="$parentText"/> with no text still makes the label that
+			// Lua fills later (UIPanelButtonTemplate: _G[name.."Text"]:SetText(...)).
+			if (Def.ButtonText.IsEmpty()) Def.ButtonText = TEXT(" ");
 		}
 	}
 
@@ -1133,6 +1261,9 @@ static FWowFrameDef ParseFrameNode(const FXmlNode* Node)
 	FString EnableKeyboard = Node->GetAttribute(TEXT("enableKeyboard"));
 	Def.bEnableKeyboard = EnableKeyboard.Equals(TEXT("true"), ESearchCase::IgnoreCase);
 
+	Def.bClampedToScreen = Node->GetAttribute(TEXT("clampedToScreen")).Equals(TEXT("true"), ESearchCase::IgnoreCase);
+	Def.ButtonText = Node->GetAttribute(TEXT("text")); // <Button text="CLOSE">, as in the pugi parser
+
 	FString StrataStr = Node->GetAttribute(TEXT("frameStrata"));
 	if (!StrataStr.IsEmpty()) Def.Strata = FWowFrameXmlParser::ParseStrata(StrataStr);
 
@@ -1142,6 +1273,14 @@ static FWowFrameDef ParseFrameNode(const FXmlNode* Node)
 	FString IdStr = Node->GetAttribute(TEXT("id"));
 	if (!IdStr.IsEmpty()) Def.FrameID = FCString::Atoi(*IdStr);
 
+    if (const FXmlNode* Hit = Node->FindChildNode(TEXT("HitRectInsets")))
+    {
+        const FXmlNode* Inset = Hit->FindChildNode(TEXT("AbsInset"));
+        if (!Inset) Inset = Hit;
+        Def.HitRectInsets = FMargin(FCString::Atof(*Inset->GetAttribute(TEXT("left"))),
+            FCString::Atof(*Inset->GetAttribute(TEXT("top"))),FCString::Atof(*Inset->GetAttribute(TEXT("right"))),
+            FCString::Atof(*Inset->GetAttribute(TEXT("bottom"))));
+    }
 	// Type-specific attributes
 	FString Orientation = Node->GetAttribute(TEXT("orientation"));
 	if (!Orientation.IsEmpty()) Def.Orientation = Orientation;
@@ -1152,6 +1291,10 @@ static FWowFrameDef ParseFrameNode(const FXmlNode* Node)
 	if (!MinVal.IsEmpty()) Def.MinValue = FCString::Atof(*MinVal);
 	if (!MaxVal.IsEmpty()) Def.MaxValue = FCString::Atof(*MaxVal);
 	if (!DefVal.IsEmpty()) Def.DefaultValue = FCString::Atof(*DefVal);
+	if (const FXmlNode* BarTexture = Node->FindChildNode(TEXT("BarTexture")))
+	{
+		Def.BarTexture = BarTexture->GetAttribute(TEXT("file"));
+	}
 
 	// Parse children
 	for (const FXmlNode* Child = Node->GetFirstChildNode(); Child; Child = Child->GetNextNode())
@@ -1173,6 +1316,16 @@ static FWowFrameDef ParseFrameNode(const FXmlNode* Node)
 		else if (Tag.Equals(TEXT("Scripts"), ESearchCase::IgnoreCase))
 		{
 			Def.Scripts = ParseScripts(Child);
+		}
+		else if (Tag.Equals(TEXT("Attributes"), ESearchCase::IgnoreCase))
+		{
+			for (const FXmlNode* Attr = Child->GetFirstChildNode(); Attr; Attr = Attr->GetNextNode())
+			{
+				if (!Attr->GetTag().Equals(TEXT("Attribute"), ESearchCase::IgnoreCase)) continue;
+				FString Type = Attr->GetAttribute(TEXT("type"));
+				if (Type.IsEmpty()) Type = TEXT("string");
+				Def.XmlAttributes.Add({Attr->GetAttribute(TEXT("name")), Type, Attr->GetAttribute(TEXT("value"))});
+			}
 		}
 		else if (Tag.Equals(TEXT("Animations"), ESearchCase::IgnoreCase))
 		{
@@ -1206,38 +1359,48 @@ static FWowFrameDef ParseFrameNode(const FXmlNode* Node)
 		{
 			// ButtonText can have a FontString child or just text content
 			const FXmlNode* FS = Child->FindChildNode(TEXT("FontString"));
-			if (FS)
-			{
-				Def.ButtonText = FS->GetAttribute(TEXT("text"));
-			}
-			else
-			{
-				Def.ButtonText = Child->GetContent();
-			}
+			const FString ChildText = FS ? FS->GetAttribute(TEXT("text")) : Child->GetContent();
+			if (!ChildText.TrimStartAndEnd().IsEmpty() || Def.ButtonText.IsEmpty()) Def.ButtonText = ChildText;
 		}
 		else if (Tag.Equals(TEXT("NormalTexture"), ESearchCase::IgnoreCase))
 		{
 			Def.NormalTexture = Child->GetAttribute(TEXT("file"));
 			Def.NormalTextureName = Child->GetAttribute(TEXT("name"));
 			Def.NormalTextureParentKey = Child->GetAttribute(TEXT("parentKey"));
+            const FWowTextureElement Texture = ParseTextureNode(Child);
+            Def.NormalTextureUV = FVector4(Texture.Left, Texture.Right, Texture.Top, Texture.Bottom);
+            // r379: its own size and first anchor.
+            Def.NormalTextureW = Texture.Width; Def.NormalTextureH = Texture.Height;
+            if (Texture.Anchors.Num() > 0)
+            {
+                Def.NormalTexturePoint = Texture.Anchors[0].Point;
+                Def.NormalTextureRelativePoint = Texture.Anchors[0].RelativePoint;
+                Def.NormalTextureOffset = FVector2D(Texture.Anchors[0].OffsetX, Texture.Anchors[0].OffsetY);
+            }
 		}
 		else if (Tag.Equals(TEXT("PushedTexture"), ESearchCase::IgnoreCase))
 		{
 			Def.PushedTexture = Child->GetAttribute(TEXT("file"));
 			Def.PushedTextureName = Child->GetAttribute(TEXT("name"));
 			Def.PushedTextureParentKey = Child->GetAttribute(TEXT("parentKey"));
+            const FWowTextureElement Texture = ParseTextureNode(Child);
+            Def.PushedTextureUV = FVector4(Texture.Left, Texture.Right, Texture.Top, Texture.Bottom);
 		}
 		else if (Tag.Equals(TEXT("HighlightTexture"), ESearchCase::IgnoreCase))
 		{
 			Def.HighlightTexture = Child->GetAttribute(TEXT("file"));
 			Def.HighlightTextureName = Child->GetAttribute(TEXT("name"));
 			Def.HighlightTextureParentKey = Child->GetAttribute(TEXT("parentKey"));
+            const FWowTextureElement Texture = ParseTextureNode(Child);
+            Def.HighlightTextureUV = FVector4(Texture.Left, Texture.Right, Texture.Top, Texture.Bottom);
 		}
 		else if (Tag.Equals(TEXT("DisabledTexture"), ESearchCase::IgnoreCase))
 		{
 			Def.DisabledTexture = Child->GetAttribute(TEXT("file"));
 			Def.DisabledTextureName = Child->GetAttribute(TEXT("name"));
 			Def.DisabledTextureParentKey = Child->GetAttribute(TEXT("parentKey"));
+            const FWowTextureElement Texture = ParseTextureNode(Child);
+            Def.DisabledTextureUV = FVector4(Texture.Left, Texture.Right, Texture.Top, Texture.Bottom);
 		}
 		else if (Tag.Equals(TEXT("ThumbTexture"), ESearchCase::IgnoreCase))
 		{
@@ -1357,6 +1520,8 @@ TArray<FWowXmlDirective> FWowFrameXmlParser::ParseXml(const TArray<uint8>& Data,
 			Dir.FontInherits = UTF8_TO_TCHAR(Child.attribute("inherits").as_string());
 			Dir.FontFlags = UTF8_TO_TCHAR(Child.attribute("flags").as_string());
 			Dir.FontHeight = Child.attribute("height").as_float(12.0f);
+			Dir.bFontHasHeight = !Child.attribute("height").empty();
+			Dir.FontFile = UTF8_TO_TCHAR(Child.attribute("font").as_string());
 
 			pugi::xml_node FontHeightNode = Child.child("FontHeight");
 			if (FontHeightNode)
@@ -1365,13 +1530,30 @@ TArray<FWowXmlDirective> FWowFrameXmlParser::ParseXml(const TArray<uint8>& Data,
 				if (AbsValue)
 				{
 					Dir.FontHeight = AbsValue.attribute("val").as_float(Dir.FontHeight);
+					Dir.bFontHasHeight = true;
 				}
+			}
+			if (pugi::xml_node ColorNode = Child.child("Color"))
+			{
+				Dir.bFontHasColor = true;
+				Dir.FontColor = FLinearColor(ColorNode.attribute("r").as_float(1.f), ColorNode.attribute("g").as_float(1.f),
+					ColorNode.attribute("b").as_float(1.f), ColorNode.attribute("a").as_float(1.f));
 			}
 
 			Directives.Add(Dir);
 		}
 		else
 		{
+			// <Texture name="UIPanelButtonUpTexture" virtual="true">: button state textures
+			// inherit these (<NormalTexture inherits="UIPanelButtonUpTexture"/>).
+			if (TagName == TEXT("Texture") && Child.attribute("virtual").as_bool(false))
+			{
+				const pugi::xml_node UV = Child.child("TexCoords");
+				WowVirtualButtonTextures().Add(UTF8_TO_TCHAR(Child.attribute("name").as_string()),
+					TPair<FString, FVector4>(UTF8_TO_TCHAR(Child.attribute("file").as_string()),
+						FVector4(UV.attribute("left").as_float(0), UV.attribute("right").as_float(1),
+							UV.attribute("top").as_float(0), UV.attribute("bottom").as_float(1))));
+			}
 			// Frame definition — parse it
 			FWowFrameDef Def = ParseFrameNode_Pugi(Child);
 			if (!Def.Name.IsEmpty() || Def.Type != EWowFrameType::Frame)

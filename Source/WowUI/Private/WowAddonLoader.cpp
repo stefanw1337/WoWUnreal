@@ -5,6 +5,9 @@
 #include "WowSavedVariables.h"
 #include "WowFrameManager.h"
 #include "WowEventSystem.h"
+#include "LuaApi/LuaApiRegistry.h"
+#include "WowAddonSettings.h"
+#include "WowAddonErrorLog.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -85,31 +88,7 @@ bool TryReadWowFile(FMpqManager* Mpq, const FString& InPath, TArray<uint8>& OutD
 		return false;
 	}
 
-	TArray<FString> Candidates;
-	const FString Normalized = NormalizeWowPath(InPath);
-	Candidates.AddUnique(Normalized);
-	Candidates.AddUnique(Normalized.ToLower());
-	Candidates.AddUnique(Normalized.Replace(TEXT("\\"), TEXT("/")));
-	Candidates.AddUnique(Normalized.ToLower().Replace(TEXT("\\"), TEXT("/")));
-
-	for (const FString& Candidate : Candidates)
-	{
-		if (Mpq->ReadFile(Candidate, OutData))
-		{
-			return true;
-		}
-	}
-
-	for (const FString& Candidate : Candidates)
-	{
-		const FString FileSystemPath = FPaths::Combine(Mpq->GetDataPath(), Candidate.Replace(TEXT("\\"), TEXT("/")));
-		if (FFileHelper::LoadFileToArray(OutData, *FileSystemPath))
-		{
-			return true;
-		}
-	}
-
-	return false;
+	return Mpq->ReadFile(NormalizeWowPath(InPath), OutData);
 }
 
 bool IsAddonLoaded(const FString& AddonName)
@@ -128,7 +107,8 @@ bool ProcessXmlDirectivesRecursive(
 	FMpqManager* Mpq,
 	FWowLuaVM* LuaVM,
 	FWowFrameManager* FrameManager,
-	TSet<FString>& VisitedXmlFiles)
+	TSet<FString>& VisitedXmlFiles,
+	const FString& AddonName)
 {
 	const FString NormalizedXmlPath = NormalizeWowPath(XmlPath);
 	const FString VisitKey = NormalizedXmlPath.ToLower();
@@ -161,7 +141,7 @@ bool ProcessXmlDirectivesRecursive(
 				TArray<uint8> ScriptData;
 				if (TryReadWowFile(Mpq, ScriptPath, ScriptData))
 				{
-					LuaVM->ExecuteBuffer(ScriptData, ScriptPath);
+					LuaVM->ExecuteAddonBuffer(ScriptData, ScriptPath, AddonName);
 				}
 				else
 				{
@@ -173,7 +153,7 @@ bool ProcessXmlDirectivesRecursive(
 		case FWowXmlDirective::EType::Include:
 			if (!Dir.FilePath.IsEmpty())
 			{
-				ProcessXmlDirectivesRecursive(ResolveWowPath(BaseDirectory, Dir.FilePath), Mpq, LuaVM, FrameManager, VisitedXmlFiles);
+				ProcessXmlDirectivesRecursive(ResolveWowPath(BaseDirectory, Dir.FilePath), Mpq, LuaVM, FrameManager, VisitedXmlFiles, AddonName);
 			}
 			break;
 
@@ -186,6 +166,7 @@ bool ProcessXmlDirectivesRecursive(
 
 		case FWowXmlDirective::EType::Font:
 			UE_LOG(LogWowAddon, Verbose, TEXT("  Font directive discovered in addon XML: %s"), *Dir.FontName);
+			WowLuaApi::RegisterFontObject(LuaVM->GetState(), Dir.FontName, Dir.FontInherits, Dir.FontHeight, Dir.FontFlags);
 			break;
 		}
 	}
@@ -267,6 +248,7 @@ FWowTocData FWowAddonLoader::ParseToc(const TArray<uint8>& Data)
 			{
 				Key = Key.TrimStartAndEnd();
 				Value = Value.TrimStartAndEnd();
+				Toc.Metadata.Add(Key.ToLower(), Value); // GetAddOnMetadata (Title, Version, X-*)
 
 				if (Key.Equals(TEXT("Title"), ESearchCase::IgnoreCase))
 				{
@@ -347,6 +329,52 @@ FWowTocData FWowAddonLoader::ParseToc(const TArray<uint8>& Data)
 	return Toc;
 }
 
+// r364 (Stefan 16.10: "a bit much freezing" opening the AddOns list and on Reload UI): with 2076
+// addon folders, every list opening and every reload walked the folders, checked each .toc and read
+// all of them again (the 11:02 log: 9 s to open the list, 12 s for one reload, three passes). The
+// folder list is kept per AddOns folder until that folder's timestamp changes (an addon added,
+// removed or renamed), and the .toc bytes for the session; LoadAddon still reads the .toc of each
+// addon it loads fresh, so an edited .toc takes effect on the next reload.
+namespace WowAddonDiscoveryCache
+{
+	struct FRootEntry
+	{
+		FDateTime Stamp;
+		TArray<FString> Names; // folders with their .toc, sorted
+		TArray<FString> Skipped;
+		TSet<FString> OnDisk; // names whose .toc is a loose file in this folder
+	};
+	TMap<FString, FRootEntry> Roots;
+	TMap<FString, TArray<uint8>> Tocs; // lower-case addon name -> .toc bytes
+	TMap<FString, FString> TocFiles;   // r391: lower-case addon name -> its loose .toc on disk
+	const void* TocOwner = nullptr;
+}
+
+bool FWowAddonLoader::ReadTocCached(FMpqManager* Mpq, const FString& AddonName, TArray<uint8>& OutData)
+{
+	if (!Mpq || AddonName.IsEmpty()) return false;
+	if (WowAddonDiscoveryCache::TocOwner != Mpq)
+	{
+		WowAddonDiscoveryCache::Tocs.Reset();
+		WowAddonDiscoveryCache::TocOwner = Mpq;
+	}
+	const FString Key = AddonName.ToLower();
+	if (const TArray<uint8>* Cached = WowAddonDiscoveryCache::Tocs.Find(Key))
+	{
+		OutData = *Cached;
+		return OutData.Num() > 0;
+	}
+	TArray<uint8> Data;
+	// r391: a .toc that discovery found on disk is read straight from there (one file read instead
+	// of the archive manager's search through every root and archive - 2077 of them took ~10 s).
+	const FString* TocFile = WowAddonDiscoveryCache::TocFiles.Find(Key);
+	if (!TocFile || !FFileHelper::LoadFileToArray(Data, **TocFile))
+		TryReadWowFile(Mpq, FString::Printf(TEXT("Interface\\AddOns\\%s\\%s.toc"), *AddonName, *AddonName), Data);
+	WowAddonDiscoveryCache::Tocs.Add(Key, Data);
+	OutData = MoveTemp(Data);
+	return OutData.Num() > 0;
+}
+
 TArray<FString> FWowAddonLoader::DiscoverAddons(FMpqManager* Mpq)
 {
 	TArray<FString> AddonNames;
@@ -356,22 +384,68 @@ TArray<FString> FWowAddonLoader::DiscoverAddons(FMpqManager* Mpq)
 		return AddonNames;
 	}
 
-	// Check filesystem for addon directories
-	FString AddOnsPath = FPaths::Combine(Mpq->GetDataPath(), TEXT("Interface"), TEXT("AddOns"));
+	// Discover from the same priority-ordered roots used for every asset read.
 	IFileManager& FM = IFileManager::Get();
-
-	TArray<FString> Directories;
-	FM.FindFiles(Directories, *FPaths::Combine(AddOnsPath, TEXT("*")), false, true);
-
-	for (const FString& Dir : Directories)
+	TSet<FString> Seen;
+	for (const FString& Root : Mpq->GetLooseFileRoots())
 	{
-		FString AddonName = FPaths::GetCleanFilename(Dir);
-		// Verify a .toc file exists
-		FString TocPath = FString::Printf(TEXT("Interface\\AddOns\\%s\\%s.toc"), *AddonName, *AddonName);
-		TArray<uint8> IgnoredData;
-		if (TryReadWowFile(Mpq, TocPath, IgnoredData) || FM.FileExists(*FPaths::Combine(AddOnsPath, AddonName, AddonName + TEXT(".toc"))))
+		const FString AddOnsPath = Root / TEXT("Interface/AddOns");
+		const FDateTime Stamp = FM.GetTimeStamp(*AddOnsPath);
+		WowAddonDiscoveryCache::FRootEntry* Cached = WowAddonDiscoveryCache::Roots.Find(AddOnsPath);
+		// r391 (Stefan 16.10: AddOns and Okay/ReloadUI froze for ~10 s): a root that does not exist
+		// (Data/Interface/AddOns) has no time stamp and was rescanned every time - and every rescan
+		// emptied the .toc cache, so all 2077 .toc files were read again. A missing folder that is
+		// still missing keeps its (empty) entry; the cache is emptied only when the folder list changed.
+		const bool bMissingStill = Cached && Stamp == FDateTime::MinValue() && Cached->Stamp == Stamp
+			&& !FM.DirectoryExists(*AddOnsPath);
+		if (!bMissingStill && (!Cached || Cached->Stamp != Stamp || Stamp == FDateTime::MinValue()))
 		{
-			AddonNames.AddUnique(AddonName);
+			const TArray<FString> OldNames = Cached ? Cached->Names : TArray<FString>();
+			const bool bHadEntry = Cached != nullptr;
+			WowAddonDiscoveryCache::FRootEntry Fresh;
+			Fresh.Stamp = Stamp;
+			TArray<FString> Directories;
+			FM.FindFiles(Directories, *(AddOnsPath / TEXT("*")), false, true);
+			Directories.Sort();
+			UE_LOG(LogWowAddon, Log, TEXT("Addon root %s: %d folders"), *AddOnsPath, Directories.Num());
+			for (const FString& Name : Directories)
+			{
+				// The folder is on disk, so its .toc normally is too: one disk check, the archive
+				// lookup only when that fails.
+				const bool bDiskToc = FM.FileExists(*(AddOnsPath / Name / (Name + TEXT(".toc"))));
+				const bool bToc = bDiskToc
+					|| Mpq->FileExists(FString::Printf(TEXT("Interface/AddOns/%s/%s.toc"), *Name, *Name));
+				(bToc ? Fresh.Names : Fresh.Skipped).Add(Name);
+				if (bDiskToc) Fresh.OnDisk.Add(Name);
+			}
+			// an addon was added, removed or renamed
+			if (bHadEntry && OldNames != Fresh.Names)
+			{
+				WowAddonDiscoveryCache::Tocs.Reset();
+				WowAddonDiscoveryCache::TocFiles.Reset();
+			}
+			Cached = &WowAddonDiscoveryCache::Roots.Add(AddOnsPath, MoveTemp(Fresh));
+			for (const FString& Name : Cached->Skipped)
+			{
+				UE_LOG(LogWowAddon, Warning, TEXT("  %s has no %s.toc, skipped"), *Name, *Name);
+			}
+		}
+		for (const FString& Name : Cached->Names)
+		{
+			// r428 (Stefan 23.10: "why do we have a WoWUnreal addon?"): the old built-in addon
+			// WowUnreal_UI is now part of the client (WowUIManager.cpp); copies still installed in
+			// a Data folder are neither listed nor loaded.
+			if (Name.StartsWith(TEXT("WowUnreal_"), ESearchCase::IgnoreCase)) continue;
+			bool bSeen = false;
+			Seen.Add(Name.ToLower(), &bSeen);
+			if (!bSeen)
+			{
+				AddonNames.Add(Name);
+				if (Cached->OnDisk.Contains(Name))
+					WowAddonDiscoveryCache::TocFiles.Add(Name.ToLower(), AddOnsPath / Name / (Name + TEXT(".toc")));
+				else
+					WowAddonDiscoveryCache::TocFiles.Remove(Name.ToLower());
+			}
 		}
 	}
 
@@ -379,11 +453,10 @@ TArray<FString> FWowAddonLoader::DiscoverAddons(FMpqManager* Mpq)
 	for (int32 i = 0; BlizzardAddons[i]; i++)
 	{
 		FString Name = UTF8_TO_TCHAR(BlizzardAddons[i]);
-		if (AddonNames.Contains(Name)) continue;
+		if (Seen.Contains(Name.ToLower())) continue;
 
-		FString TocPath = FString::Printf(TEXT("Interface\\AddOns\\%s\\%s.toc"), *Name, *Name);
 		TArray<uint8> IgnoredData;
-		if (TryReadWowFile(Mpq, TocPath, IgnoredData))
+		if (ReadTocCached(Mpq, Name, IgnoredData)) // r364
 		{
 			AddonNames.AddUnique(Name);
 		}
@@ -391,6 +464,12 @@ TArray<FString> FWowAddonLoader::DiscoverAddons(FMpqManager* Mpq)
 
 	UE_LOG(LogWowAddon, Log, TEXT("Discovered %d addons"), AddonNames.Num());
 	return AddonNames;
+}
+
+// Blizzard_ addons are part of the client: always loaded and never "out of date".
+static bool IsClientAddon(const FString& Name)
+{
+	return Name.StartsWith(TEXT("Blizzard_"), ESearchCase::IgnoreCase);
 }
 
 TArray<FString> FWowAddonLoader::ResolveLoadOrder(FMpqManager* Mpq, const TArray<FString>& AddonNames)
@@ -401,12 +480,42 @@ TArray<FString> FWowAddonLoader::ResolveLoadOrder(FMpqManager* Mpq, const TArray
 	TMap<FString, FWowTocData> TocMap;
 	for (const FString& Name : AddonNames)
 	{
-		FString TocPath = FString::Printf(TEXT("Interface\\AddOns\\%s\\%s.toc"), *Name, *Name);
 		TArray<uint8> TocData;
 
-		if (TryReadWowFile(Mpq, TocPath, TocData))
+		if (ReadTocCached(Mpq, Name, TocData)) // r364
 		{
 			TocMap.Add(Name, ParseToc(TocData));
+		}
+	}
+
+	// AddOns list (Saved/WTF/AddOns.txt): an unchecked addon, or one whose required
+	// dependency is unchecked, is not loaded — same as the original client.
+	auto IsUserDisabled = [](const FString& Name)
+	{
+		return !IsClientAddon(Name) && !FWowAddonSettings::IsEnabled(Name);
+	};
+	for (bool bChanged = true; bChanged;)
+	{
+		bChanged = false;
+		for (auto& Pair : TocMap)
+		{
+			if (Pair.Value.bDisabled) continue;
+			const bool bOutOfDate = !IsClientAddon(Pair.Key)
+				&& FWowAddonSettings::IsOutOfDate(Pair.Value.Interface) && !FWowAddonSettings::GetLoadOutOfDate();
+			bool bDisable = IsUserDisabled(Pair.Key) || bOutOfDate;
+			for (const FString& Dep : Pair.Value.RequiredDeps)
+			{
+				const FWowTocData* DepToc = TocMap.Find(Dep);
+				if (DepToc && DepToc->bDisabled) bDisable = true;
+			}
+			if (bDisable)
+			{
+				UE_LOG(LogWowAddon, Log, TEXT("Addon %s not loaded: %s"), *Pair.Key,
+					IsUserDisabled(Pair.Key) ? TEXT("disabled in the AddOns list")
+					: bOutOfDate ? TEXT("out of date") : TEXT("a required dependency is disabled"));
+				Pair.Value.bDisabled = true;
+				bChanged = true;
+			}
 		}
 	}
 
@@ -552,6 +661,20 @@ bool LoadAddonInternal(
 	}
 
 	FWowTocData Toc = FWowAddonLoader::ParseToc(TocData);
+	if (!IsClientAddon(AddonName) && !FWowAddonSettings::IsEnabled(AddonName))
+	{
+		UE_LOG(LogWowAddon, Log, TEXT("LoadAddOn %s: disabled in the AddOns list"), *AddonName);
+		LoadingStack.Remove(LoadingKey);
+		return false;
+	}
+
+	if (!AddonName.StartsWith(TEXT("Blizzard_"), ESearchCase::IgnoreCase)
+		&& FWowAddonSettings::IsOutOfDate(Toc.Interface) && !FWowAddonSettings::GetLoadOutOfDate())
+	{
+		UE_LOG(LogWowAddon, Log, TEXT("Addon %s not loaded: out of date"), *AddonName);
+		LoadingStack.Remove(LoadingKey);
+		return false;
+	}
 
 	if (Toc.bDisabled)
 	{
@@ -612,11 +735,11 @@ bool LoadAddonInternal(
 
 		if (File.EndsWith(TEXT(".lua"), ESearchCase::IgnoreCase))
 		{
-			LuaVM->ExecuteBuffer(FileData, FullPath);
+			LuaVM->ExecuteAddonBuffer(FileData, FullPath, AddonName);
 		}
 		else if (File.EndsWith(TEXT(".xml"), ESearchCase::IgnoreCase))
 		{
-			ProcessXmlDirectivesRecursive(FullPath, Mpq, LuaVM, FrameManager, VisitedXmlFiles);
+			ProcessXmlDirectivesRecursive(FullPath, Mpq, LuaVM, FrameManager, VisitedXmlFiles, AddonName);
 		}
 	}
 
@@ -646,7 +769,13 @@ void FWowAddonLoader::LoadAllAddons(FMpqManager* Mpq, FWowLuaVM* LuaVM,
 		return;
 	}
 
+	FWowAddonErrorLog::Start(); // per-addon load results and errors for the AddOns list
 	TArray<FString> Discovered = DiscoverAddons(Mpq);
+	// WowUnreal_ addons first (order is kept otherwise), so the player's addons can restyle after them.
+	Discovered.StableSort([](const FString& A, const FString& B)
+	{
+		return A.StartsWith(TEXT("WowUnreal_"), ESearchCase::IgnoreCase) && !B.StartsWith(TEXT("WowUnreal_"), ESearchCase::IgnoreCase);
+	});
 	TArray<FString> Ordered = ResolveLoadOrder(Mpq, Discovered);
 	LoadedAddonNames.Reset();
 

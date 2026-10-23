@@ -1,152 +1,83 @@
 #include "WowSpellMissile.h"
-#include "Engine/Engine.h"
-#include "Materials/MaterialInstanceDynamic.h"
-#include "UObject/ConstructorHelpers.h"
-#include "Engine/StaticMesh.h"
-#include "Materials/Material.h"
-#include "Materials/MaterialExpressionConstant3Vector.h"
-#include "Materials/MaterialExpressionMultiply.h"
-#include "Materials/MaterialExpressionConstant.h"
-#include "Components/PointLightComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "GameFramework/Character.h"
 
 AWowSpellMissile::AWowSpellMissile()
 {
     PrimaryActorTick.bCanEverTick = true;
-
-    // Create sphere mesh component
-    SphereMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("SphereMesh"));
-    RootComponent = SphereMesh;
-
-    // Load sphere mesh
-    static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMeshAsset(TEXT("/Engine/BasicShapes/Sphere"));
-    if (SphereMeshAsset.Succeeded())
-    {
-        SphereMesh->SetStaticMesh(SphereMeshAsset.Object.Get());
-    }
-
-    // Scale down the sphere for better visibility
-    SphereMesh->SetWorldScale3D(FVector(0.5f, 0.5f, 0.5f));
-
-    // Create point light component for ambient glow
-    GlowLight = CreateDefaultSubobject<UPointLightComponent>(TEXT("GlowLight"));
-    GlowLight->SetupAttachment(SphereMesh);
-    GlowLight->SetIntensity(3000.0f);
-    GlowLight->SetAttenuationRadius(200.0f);
-    GlowLight->SetCastShadows(false); // Disable shadows for performance
-
-    // Initialize variables
-    StartPos = FVector::ZeroVector;
-    EndPos = FVector::ZeroVector;
-    TotalTravelTime = 1.0f;
-    CurrentTime = 0.0f;
-    bIsInitialized = false;
-
-    // Disable collision
-    SphereMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("MissileRoot"));
+    SetActorEnableCollision(false);
 }
 
-void AWowSpellMissile::Initialize(const FVector& StartLocation, const FVector& TargetLocation, const FLinearColor& SpellColor, float TravelTime)
+void AWowSpellMissile::InitializeAuthored(AActor* Visual, AActor* Target, float Speed,
+    TFunction<void()> OnImpact)
 {
-    StartPos = StartLocation;
-    EndPos = TargetLocation;
-    TotalTravelTime = FMath::Max(0.1f, TravelTime); // Minimum 0.1 second travel time
-    CurrentTime = 0.0f;
-    bIsInitialized = true;
-
-    // Set initial position
-    SetActorLocation(StartPos);
-
-    // Set glow light color to match spell school
-    if (GlowLight)
+    if (!IsValid(Visual) || !IsValid(Target) || !FMath::IsFinite(Speed) || Speed <= 0.0f)
     {
-        GlowLight->SetLightColor(SpellColor);
+        if (Visual) Visual->Destroy();
+        Destroy();
+        return;
     }
-
-#if WITH_EDITOR
-    // Create proper emissive material at runtime for glow effect
-    UMaterial* MissileMat = NewObject<UMaterial>(GetTransientPackage());
-    MissileMat->SetShadingModel(MSM_Unlit);
-    MissileMat->BlendMode = BLEND_Additive; // Additive for glow effect
-
-    auto* ColorParam = NewObject<UMaterialExpressionConstant3Vector>(MissileMat);
-    ColorParam->Constant = FLinearColor(SpellColor.R, SpellColor.G, SpellColor.B); // The spell school color
-    MissileMat->GetExpressionCollection().AddExpression(ColorParam);
-
-    auto* Multiply = NewObject<UMaterialExpressionMultiply>(MissileMat);
-    Multiply->ConstB = 5.0f; // Intensity multiplier for glow
-    MissileMat->GetExpressionCollection().AddExpression(Multiply);
-    Multiply->A.Connect(0, ColorParam);
-
-    MissileMat->GetEditorOnlyData()->EmissiveColor.Connect(0, Multiply);
-    MissileMat->GetEditorOnlyData()->Opacity.Connect(0, ColorParam); // Use color brightness as opacity
-
-    MissileMat->PreEditChange(nullptr);
-    MissileMat->PostEditChange();
-
-    SphereMesh->SetMaterial(0, MissileMat);
-#else
-    // Fallback for runtime without editor - use basic material with dynamic instance
-    static ConstructorHelpers::FObjectFinder<UMaterial> UnlitMaterial(TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
-    if (UnlitMaterial.Succeeded())
-    {
-        DynamicMaterial = UMaterialInstanceDynamic::Create(UnlitMaterial.Object.Get(), this);
-        if (DynamicMaterial)
-        {
-            DynamicMaterial->SetVectorParameterValue(FName("Color"), SpellColor);
-            SphereMesh->SetMaterial(0, DynamicMaterial);
-        }
-    }
-#endif
+    VisualActor = Visual;
+    TargetActor = Target;
+    StartPosition = Visual->GetActorLocation();
+    const USkeletalMeshComponent* TargetMesh = Target->FindComponentByClass<USkeletalMeshComponent>();
+    const FBox TargetBounds = TargetMesh ? TargetMesh->Bounds.GetBox() : Target->GetComponentsBoundingBox(true);
+    TargetOffset = TargetBounds.IsValid ? TargetBounds.GetCenter() - Target->GetActorLocation() : FVector::ZeroVector;
+    const FVector EndPosition = Target->GetActorLocation() + TargetOffset;
+    TravelDuration = FMath::Clamp(FVector::Distance(StartPosition, EndPosition) / Speed, 0.05f, 15.0f);
+    SetActorLocationAndRotation(StartPosition, (EndPosition - StartPosition).Rotation());
+    Visual->AttachToComponent(RootComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+    Visual->SetActorEnableCollision(false);
+    TInlineComponentArray<UPrimitiveComponent*> Primitives(Visual);
+    for (UPrimitiveComponent* Primitive : Primitives) Primitive->SetCastShadow(false);
+    ImpactCallback = MoveTemp(OnImpact);
+    SetLifeSpan(16.0f);
 }
 
-void AWowSpellMissile::BeginPlay()
+void AWowSpellMissile::AimAtSocket(FName Socket)
 {
-    Super::BeginPlay();
+    // r698 (Stefan: "make spells or even ranged attacks hit for the mobs head when it's a critical hit"):
+    // the crit is only known from the damage log, which can come while the bolt is still flying.
+    AActor* Target = TargetActor.Get();
+    if (!Target) return;
+    const ACharacter* Character = Cast<ACharacter>(Target);
+    USkeletalMeshComponent* Mesh = Character ? Character->GetMesh() : Target->FindComponentByClass<USkeletalMeshComponent>();
+    if (!Mesh || !Mesh->DoesSocketExist(Socket)) return;
+    AimMesh = Mesh;
+    AimSocket = Socket;
 }
 
 void AWowSpellMissile::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
-
-    if (!bIsInitialized)
+    if (!IsValid(VisualActor) || !TargetActor.IsValid()) { Destroy(); return; }
+    Elapsed += DeltaTime;
+    if (const USkeletalMeshComponent* Mesh = AimMesh.Get())
     {
-        return;
+        // Ease over about a tenth of a second, so the bolt bends up instead of jumping.
+        const FVector Wanted = Mesh->GetSocketLocation(AimSocket) - TargetActor->GetActorLocation();
+        TargetOffset = FMath::VInterpTo(TargetOffset, Wanted, DeltaTime, 12.0f);
     }
-
-    CurrentTime += DeltaTime;
-
-    if (CurrentTime >= TotalTravelTime)
+    const FVector TargetPosition = TargetActor->GetActorLocation() + TargetOffset;
+    const FVector Position = FMath::Lerp(StartPosition, TargetPosition,
+        FMath::Clamp(Elapsed / TravelDuration, 0.0f, 1.0f));
+    const FVector Direction = TargetPosition - GetActorLocation();
+    SetActorLocationAndRotation(Position, Direction.IsNearlyZero() ? GetActorRotation() : Direction.Rotation());
+    if (Elapsed >= TravelDuration)
     {
-        // Reached target
-        OnReachedTarget();
-    }
-    else
-    {
-        // Update position
-        UpdatePosition();
+        TFunction<void()> Callback = MoveTemp(ImpactCallback);
+        if (Callback) Callback();
+        Destroy();
     }
 }
 
-void AWowSpellMissile::UpdatePosition()
+void AWowSpellMissile::EndPlay(const EEndPlayReason::Type Reason)
 {
-    if (!bIsInitialized)
-    {
-        return;
-    }
-
-    // Simple linear interpolation
-    float Alpha = CurrentTime / TotalTravelTime;
-    Alpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
-
-    FVector NewPosition = FMath::Lerp(StartPos, EndPos, Alpha);
-    SetActorLocation(NewPosition);
-}
-
-void AWowSpellMissile::OnReachedTarget()
-{
-    // Could add impact effect here in the future
-    UE_LOG(LogTemp, Log, TEXT("Spell missile reached target"));
-
-    // Destroy the missile
-    Destroy();
+    if (IsValid(VisualActor)) VisualActor->Destroy();
+    VisualActor = nullptr;
+    ImpactCallback = nullptr;
+    Super::EndPlay(Reason);
 }

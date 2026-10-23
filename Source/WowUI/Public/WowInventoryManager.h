@@ -28,6 +28,8 @@ public:
     /** Update inventory from player entity fields */
     void UpdateFromPlayerEntity(const FWowPlayerEntity& Player, class FWowEntityManager& EntityManager);
 
+    UWowConnectionManager* GetConnectionManager() const { return ConnectionManager.Get(); }
+
     /** Get item in backpack slot (0-15) */
     const FWowItemSlot* GetBackpackItem(uint8 Slot) const;
 

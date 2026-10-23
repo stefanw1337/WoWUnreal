@@ -1,10 +1,29 @@
+#include <stdbool.h>
+
+/*
+ * WowUnreal passes UTF-8/ANSI archive paths into this C wrapper.
+ * Force StormLib's ANSI API so the header matches StormLibRAD.lib.
+ */
+#if defined(_WIN32)
+    #ifdef UNICODE
+        #undef UNICODE
+    #endif
+
+    #ifdef _UNICODE
+        #undef _UNICODE
+    #endif
+#endif
+
+#ifndef __STORMLIB_NO_STATIC_LINK__
+    #define __STORMLIB_NO_STATIC_LINK__ 1
+#endif
+
 // StormLib wrapper compiled as C to avoid UE PCH/TCHAR conflicts.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wundef"
 #pragma clang diagnostic ignored "-Wmissing-variable-declarations"
 #include "StormLib.h"
 #pragma clang diagnostic pop
-#include <stdbool.h>
 
 typedef void* STORMLIB_HANDLE;
 typedef unsigned int STORMLIB_UINT32;
@@ -40,10 +59,19 @@ STORMLIB_UINT32 StormLib_GetFileSize(STORMLIB_HANDLE File)
     return SFileGetFileSize((HANDLE)File, NULL);
 }
 
-bool StormLib_ReadFile(STORMLIB_HANDLE File, void* Buffer, STORMLIB_UINT32 Size, STORMLIB_UINT32* BytesRead)
+bool StormLib_ReadFile(
+    STORMLIB_HANDLE File,
+    void* Buffer,
+    STORMLIB_UINT32 Size,
+    STORMLIB_UINT32* BytesRead)
 {
     DWORD Read = 0;
     bool Result = SFileReadFile((HANDLE)File, Buffer, Size, &Read, NULL);
-    if (BytesRead) *BytesRead = (STORMLIB_UINT32)Read;
+
+    if (BytesRead)
+    {
+        *BytesRead = (STORMLIB_UINT32)Read;
+    }
+
     return Result;
 }

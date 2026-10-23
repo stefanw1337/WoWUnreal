@@ -1,4 +1,6 @@
 #include "WowViewerGameMode.h"
+#include "Widgets/Layout/SDPIScaler.h"
+#include "WowClientPreferences.h"
 #include "WowFlyCamera.h"
 #include "WowPlayerCharacter.h"
 #include "WowGameplayController.h"
@@ -20,18 +22,45 @@
 #include "HAL/IConsoleManager.h"
 #include "Materials/Material.h"
 #include "WowCharacterBuilder.h"
+#include "WowAnimationController.h"
 #include "WowAudioManager.h"
 #include "WowLoginController.h"
 #include "WowCredentialStore.h"
 #include "WowEntity.h"
+#include "WowEntityManager.h"
+#include "WowSessionState.h"
+#include "Formats/Dbc/DbcStore.h"
+#include "Formats/Dbc/CharStartOutfitDbc.h"
 #include "TimerManager.h"
 #include "Engine/GameViewportClient.h"
+#include "UnrealClient.h"
 #include "Components/CanvasPanel.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "Coord/WowCoordinate.h"
+#include "HAL/PlatformFileManager.h"
+#include "Misc/Paths.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogWowGameMode, Log, All);
 
 namespace
 {
+constexpr uint8 OfflineClassId = 1;  // Warrior; the entity field remains authoritative
+
+uint8 GetOfflineRaceId()
+{
+    int32 RaceId = 1;
+    FParse::Value(FCommandLine::Get(), TEXT("-offlinerace="), RaceId);
+    const bool bPlayableWotlkRace = RaceId >= 1 && RaceId <= 11 && RaceId != 9;
+    return static_cast<uint8>(bPlayableWotlkRace ? RaceId : 1);
+}
+
+uint8 GetOfflineGenderId()
+{
+    int32 GenderId = 0;
+    FParse::Value(FCommandLine::Get(), TEXT("-offlinegender="), GenderId);
+    return static_cast<uint8>(GenderId == 1 ? 1 : 0);
+}
+
 void ApplyWowViewerUiInputMode(APlayerController* PlayerController, const TSharedPtr<SWidget>& WidgetToFocus)
 {
     if (!PlayerController)
@@ -84,13 +113,9 @@ void AWowViewerGameMode::SetupPostProcess(UWorld* World)
         }
     };
     SetCVar(TEXT("r.Shadow.Virtual.Enable"), 0);
-    SetCVar(TEXT("r.VolumetricFog"), 0);
-    SetCVar(TEXT("r.Lumen.DiffuseIndirect.Allow"), 0);
-    SetCVar(TEXT("r.Lumen.Reflections.Allow"), 0);
-    SetCVar(TEXT("r.Lumen.TranslucencyReflections.FrontLayer.Allow"), 0);
-    SetCVar(TEXT("r.DynamicGlobalIlluminationMethod"), 0); // None instead of Lumen
-    SetCVar(TEXT("r.ReflectionMethod"), 0); // None instead of Lumen
     SetCVar(TEXT("r.Shadow.CSM.MaxCascades"), 2); // Reduce shadow cascades
+    // Renderer setup must honor the same saved options as the login screen.
+    FWowClientPreferences::ApplyAdvancedVideoPreferences();
 
     APostProcessVolume* PPV = World->SpawnActor<APostProcessVolume>();
     if (PPV)
@@ -150,10 +175,13 @@ void AWowViewerGameMode::SpawnDirectionalLight(UWorld* World)
 {
     ADirectionalLight* Sun = World->SpawnActor<ADirectionalLight>(
         ADirectionalLight::StaticClass(), FTransform(FRotator(-45.0f, 30.0f, 0.0f), FVector::ZeroVector));
-    if (Sun)
+    if (UDirectionalLightComponent* LightComponent = Sun
+        ? Cast<UDirectionalLightComponent>(Sun->GetLightComponent())
+        : nullptr)
     {
-        Sun->GetLightComponent()->SetIntensity(3.14159f);
-        Sun->GetLightComponent()->SetLightColor(FLinearColor(1.0f, 0.95f, 0.85f));
+        LightComponent->SetIntensity(3.14159f);
+        LightComponent->SetLightColor(FLinearColor(1.0f, 0.95f, 0.85f));
+        LightComponent->SetForwardShadingPriority(0);
     }
 }
 
@@ -171,8 +199,78 @@ void AWowViewerGameMode::BeginPlay()
 
     // Post-process is always needed
     SetupPostProcess(World);
+	
+	if (FParse::Param(FCommandLine::Get(), TEXT("offlineworld")) &&
+        !FParse::Param(FCommandLine::Get(), TEXT("offlineloading")))
+{
+    SetupDefaultScene(World);
 
-    if (TestScene == TEXT("character"))
+    if (AWowPlayerCharacter* Player = Cast<AWowPlayerCharacter>(
+        UGameplayStatics::GetPlayerPawn(this, 0)))
+    {
+        AWowWorldManager* WorldManager = Cast<AWowWorldManager>(
+            UGameplayStatics::GetActorOfClass(World, AWowWorldManager::StaticClass()));
+        if (!WorldManager || !WorldManager->HasExternalData())
+        {
+            Player->EnableNativeFallbackVisuals();
+            Player->SetActorLocation(FVector(250.0f, -300.0f, 100.0f),
+                false, nullptr, ETeleportType::TeleportPhysics);
+            Player->SetActorEnableCollision(true);
+            if (UCharacterMovementComponent* Movement = Player->GetCharacterMovement())
+            {
+                Player->ApplyGameplayMovementSettings(true);
+                Movement->SetMovementMode(MOVE_Walking);
+            }
+            if (APlayerController* Controller = UGameplayStatics::GetPlayerController(this, 0))
+            {
+                Controller->SetViewTarget(Player);
+                Controller->SetControlRotation(FRotator(-12.0f, 0.0f, 0.0f));
+            }
+            UE_LOG(LogWowGameMode, Warning,
+                TEXT("[FALLBACKTEST] PASS: playable stick pawn, walking collision, follow camera"));
+            return;
+        }
+
+		if (FParse::Param(FCommandLine::Get(), TEXT("testspellworldless")))
+		{
+			SpawnGroundPlane(World, FVector::ZeroVector, 30.0f);
+			Player->SetActorLocation(FVector(0.0f, 0.0f, 96.0f),
+				false, nullptr, ETeleportType::TeleportPhysics);
+			Player->SetActorEnableCollision(true);
+			if (UCharacterMovementComponent* Movement = Player->GetCharacterMovement())
+			{
+				Player->ApplyGameplayMovementSettings(true);
+				Movement->SetMovementMode(MOVE_Walking);
+			}
+			if (APlayerController* Controller = UGameplayStatics::GetPlayerController(this, 0))
+			{
+				Controller->SetViewTarget(Player);
+				Controller->SetControlRotation(FRotator(-12.0f, 0.0f, 0.0f));
+			}
+			UE_LOG(LogWowGameMode, Log,
+				TEXT("Spell preview uses the lightweight MPQ scene without terrain streaming"));
+			return;
+		}
+
+        const FVector Northshire =
+            FWowCoordinate::WowToUE(-8949.0f, -132.0f, 84.0f);
+        OfflinePlayerPawn = Player;
+        Player->SetActorLocation(Northshire + FVector(0.0f, 0.0f, 20000.0f),
+            false, nullptr, ETeleportType::TeleportPhysics);
+        Player->SetActorEnableCollision(false);
+        if (UCharacterMovementComponent* Movement = Player->GetCharacterMovement())
+        {
+            Movement->GravityScale = 0.0f;
+            Movement->Velocity = FVector::ZeroVector;
+            Movement->SetMovementMode(MOVE_Flying);
+        }
+        GetWorldTimerManager().SetTimer(OfflineGroundTimerHandle, this,
+            &AWowViewerGameMode::TryFinalizeOfflineSpawn, 0.5f, true, 0.5f);
+        UE_LOG(LogWowGameMode, Log,
+            TEXT("Holding offline player above Northshire until terrain collision is ready"));
+    }
+}
+else if (TestScene == TEXT("character"))
     {
         SetupCharacterTestScene(World);
     }
@@ -203,9 +301,104 @@ void AWowViewerGameMode::BeginPlay()
     }
 }
 
+void AWowViewerGameMode::TryFinalizeOfflineSpawn()
+{
+    if (!OfflinePlayerPawn || !GetWorld())
+    {
+        GetWorldTimerManager().ClearTimer(OfflineGroundTimerHandle);
+        return;
+    }
+
+    const FVector PawnPos = OfflinePlayerPawn->GetActorLocation();
+    const FVector TraceStart(PawnPos.X, PawnPos.Y, 500000.0f);
+    const FVector TraceEnd(PawnPos.X, PawnPos.Y, -500000.0f);
+    FHitResult Hit;
+    FCollisionQueryParams QueryParams;
+    QueryParams.AddIgnoredActor(OfflinePlayerPawn);
+    QueryParams.bTraceComplex = true;
+    if (!GetWorld()->LineTraceSingleByChannel(
+        Hit, TraceStart, TraceEnd, ECC_WorldStatic, QueryParams))
+    {
+        return;
+    }
+
+    OfflinePlayerPawn->SetActorEnableCollision(true);
+    OfflinePlayerPawn->ApplyLoginSpawn(Hit.ImpactPoint, 0.0f);
+    GetWorldTimerManager().ClearTimer(OfflineGroundTimerHandle);
+    UE_LOG(LogWowGameMode, Log,
+        TEXT("Offline player grounded at %s on %s"),
+        *OfflinePlayerPawn->GetActorLocation().ToString(),
+        Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("<unknown>"));
+
+    if (FParse::Param(FCommandLine::Get(), TEXT("verifyplayerlocomotion")))
+    {
+        StartOfflineLocomotionVerification();
+    }
+}
+
+void AWowViewerGameMode::StartOfflineLocomotionVerification()
+{
+    TWeakObjectPtr<AWowPlayerCharacter> WeakPlayer = OfflinePlayerPawn;
+    const FString ScreenshotDir = FPaths::Combine(
+        FPaths::ProjectSavedDir(), TEXT("Screenshots"), TEXT("PlayerLocomotion"));
+    FPlatformFileManager::Get().GetPlatformFile().CreateDirectoryTree(*ScreenshotDir);
+
+    FTimerHandle RunTimer;
+    GetWorldTimerManager().SetTimer(RunTimer, [WeakPlayer]()
+    {
+        if (AWowPlayerCharacter* Player = WeakPlayer.Get())
+        {
+            if (UCharacterMovementComponent* Movement = Player->GetCharacterMovement())
+            {
+                Movement->SetMovementMode(MOVE_Walking);
+                Movement->Velocity = Player->GetActorForwardVector() * 700.0f;
+            }
+        }
+    }, 0.35f, false);
+
+    const auto ScheduleScreenshot = [this, ScreenshotDir](float Delay, const TCHAR* Filename)
+    {
+        FTimerHandle ScreenshotTimer;
+        const FString ScreenshotPath = FPaths::Combine(ScreenshotDir, Filename);
+        GetWorldTimerManager().SetTimer(ScreenshotTimer, [ScreenshotPath]()
+        {
+            FScreenshotRequest::RequestScreenshot(ScreenshotPath, true, false);
+        }, Delay, false);
+    };
+    ScheduleScreenshot(0.47f, TEXT("DwarfPlayer_Run_A.png"));
+    ScheduleScreenshot(0.72f, TEXT("DwarfPlayer_Run_B.png"));
+
+    FTimerHandle JumpTimer;
+    GetWorldTimerManager().SetTimer(JumpTimer, [WeakPlayer]()
+    {
+        if (AWowPlayerCharacter* Player = WeakPlayer.Get())
+        {
+            Player->Jump();
+            if (Player->AnimationController)
+            {
+                Player->AnimationController->NotifyLocalJumpStarted(
+                    Player->GetActorLocation().Z);
+            }
+        }
+    }, 0.92f, false);
+    ScheduleScreenshot(1.04f, TEXT("DwarfPlayer_Jump_A.png"));
+    ScheduleScreenshot(1.34f, TEXT("DwarfPlayer_Jump_B.png"));
+
+    FTimerHandle QuitTimer;
+    GetWorldTimerManager().SetTimer(QuitTimer, []()
+    {
+        FGenericPlatformMisc::RequestExit(false);
+    }, 1.75f, false);
+}
+
 void AWowViewerGameMode::SetupDefaultScene(UWorld* World)
 {
     UE_LOG(LogWowGameMode, Log, TEXT("Starting default (full world) scene"));
+    const bool bOfflineWorld = FParse::Param(FCommandLine::Get(), TEXT("offlineworld"));
+	const bool bWorldlessSpellPreview =
+		FParse::Param(FCommandLine::Get(), TEXT("testspellworldless"));
+    const uint8 OfflineRaceId = GetOfflineRaceId();
+    const uint8 OfflineGenderId = GetOfflineGenderId();
 
     // Spawn sky
     {
@@ -218,13 +411,13 @@ void AWowViewerGameMode::SetupDefaultScene(UWorld* World)
     // World manager (full streaming) — BeginPlay defers terrain if bStreamingEnabled=false,
     // so we enable it immediately after spawn for the full world scene.
     AWowWorldManager* WorldManager = SpawnWorldManager(World);
-    if (WorldManager)
+    if (WorldManager && !bWorldlessSpellPreview)
     {
         WorldManager->EnableTerrainStreaming();
     }
 
     // Spawn audio manager
-    if (WorldManager && WorldManager->GetMpqManager())
+    if (WorldManager && WorldManager->HasExternalData())
     {
         AWowAudioManager* AudioMgr = World->SpawnActor<AWowAudioManager>(
             AWowAudioManager::StaticClass());
@@ -235,12 +428,57 @@ void AWowViewerGameMode::SetupDefaultScene(UWorld* World)
     }
 
     // Load UI with root canvas for widget rendering
-    if (WorldManager && WorldManager->GetMpqManager())
+    if (WorldManager && WorldManager->HasExternalData())
     {
         if (UGameInstance* GI = GetGameInstance())
         {
             if (UWowUIManager* UIManager = GI->GetSubsystem<UWowUIManager>())
             {
+                if (bOfflineWorld)
+                {
+                    // Give the real FrameXML UI a stable local player without
+                    // opening an auth or world connection.
+                    OfflineConnectionManager = NewObject<UWowConnectionManager>(this, TEXT("OfflineConnectionManager"));
+                    FWowEntityManager& EntityManager = OfflineConnectionManager->PacketHandler.EntityManager;
+                    constexpr uint64 OfflineGuid = 1;
+                    EntityManager.LocalPlayerGuid = OfflineGuid;
+                    FWowEntity& BaseEntity = EntityManager.PromoteToTyped(
+                        OfflineGuid, WowTypeMask::OBJECT | WowTypeMask::UNIT | WowTypeMask::PLAYER);
+                    BaseEntity.Movement.Position = FVector(-8949.0f, -132.0f, 84.0f);
+                    BaseEntity.SetField(ObjectField::GUID, static_cast<uint32>(OfflineGuid));
+                    BaseEntity.SetField(ObjectField::GUID + 1, 0);
+                    BaseEntity.SetField(ObjectField::TYPE,
+                        WowTypeMask::OBJECT | WowTypeMask::UNIT | WowTypeMask::PLAYER);
+					BaseEntity.SetField(UnitField::BYTES_0,
+						static_cast<uint32>(OfflineRaceId)
+						| (static_cast<uint32>(OfflineClassId) << 8)
+						| (static_cast<uint32>(OfflineGenderId) << 16));
+                    BaseEntity.SetField(UnitField::HEALTH, 100);
+                    BaseEntity.SetField(UnitField::MAXHEALTH, 100);
+                    BaseEntity.SetField(UnitField::POWER1, 100);
+                    BaseEntity.SetField(UnitField::MAXPOWER1, 100);
+                    BaseEntity.SetField(UnitField::LEVEL, 1);
+                    BaseEntity.SetField(PlayerField::XP, 0);
+                    BaseEntity.SetField(PlayerField::NEXT_LEVEL_XP, 400);
+                    OfflineConnectionManager->PacketHandler.PlayerNameCache.Add(
+                        OfflineGuid, TEXT("Offline Adventurer"));
+                    UIManager->SetConnectionManager(OfflineConnectionManager);
+
+                    if (AWowGameplayController* GPC = Cast<AWowGameplayController>(
+                        UGameplayStatics::GetPlayerController(this, 0)))
+                    {
+                        GPC->ConnectionManager = OfflineConnectionManager;
+                        // Match the gameplay transition for the offline hover/target fixture.
+                        if (FParse::Param(FCommandLine::Get(), TEXT("testhovermodel")) ||
+                            FParse::Param(FCommandLine::Get(), TEXT("testunitvisuals")))
+                        {
+                            GPC->SetGameplayHudVisible(true);
+                        }
+                    }
+                    UE_LOG(LogWowGameMode, Log,
+                        TEXT("Created synthetic offline player state (no network connection)"));
+                }
+
                 // Create a root canvas panel for the WoW UI frame system
                 if (GEngine && GEngine->GameViewport)
                 {
@@ -252,7 +490,9 @@ void AWowViewerGameMode::SetupDefaultScene(UWorld* World)
                         .HAlign(HAlign_Fill)
                         .VAlign(VAlign_Fill)
                         [
-                            CanvasWidget
+                            SNew(SDPIScaler)
+                            .DPIScale_Lambda([]() { return FWowClientPreferences::GetUIScale(); })
+                            [CanvasWidget]
                         ];
                     GEngine->GameViewport->AddViewportWidgetContent(Wrapper, 50);
                     UIManager->SetRootCanvas(UIRootCanvas);
@@ -268,18 +508,58 @@ void AWowViewerGameMode::SetupDefaultScene(UWorld* World)
         }
     }
 
-    // Auto-login + gameplay controller binding
-    if (UGameInstance* GI = GetGameInstance())
+    if (bOfflineWorld && WorldManager && WorldManager->HasExternalData())
     {
-        if (UWowAutoLogin* AutoLogin = GI->GetSubsystem<UWowAutoLogin>())
+        if (AWowPlayerCharacter* Player = Cast<AWowPlayerCharacter>(
+            UGameplayStatics::GetPlayerPawn(this, 0)))
         {
-            AutoLogin->TryAutoLogin();
-            if (AWowGameplayController* GPC = Cast<AWowGameplayController>(UGameplayStatics::GetPlayerController(this, 0)))
+			TArray<FWowCharacterEquipment> StarterEquipment;
+			if (const FCharStartOutfitDbcEntry* Outfit = FDbcStore::Get().CharStartOutfit()
+				.GetByRaceClassGender(OfflineRaceId, OfflineClassId, OfflineGenderId))
+			{
+				for (int32 ItemIndex = 0; ItemIndex < 24; ++ItemIndex)
+				{
+					if (Outfit->ItemDisplayIds[ItemIndex] <= 0 || Outfit->ItemInventorySlots[ItemIndex] <= 0)
+					{
+						continue;
+					}
+					FWowCharacterEquipment& Item = StarterEquipment.AddDefaulted_GetRef();
+					Item.DisplayId = Outfit->ItemDisplayIds[ItemIndex];
+					Item.InventoryType = static_cast<uint8>(Outfit->ItemInventorySlots[ItemIndex]);
+				}
+			}
+
+			if (StarterEquipment.Num() > 0)
+			{
+				Player->SetCharacterModelWithEquipment(World, WorldManager->GetMpqManager(),
+					WorldManager->GetAssetCache(), OfflineRaceId, OfflineGenderId,
+					0, 0, 0, 0, 0, &StarterEquipment);
+			}
+			else
+			{
+				Player->SetCharacterModel(World, WorldManager->GetMpqManager(),
+					WorldManager->GetAssetCache(), OfflineRaceId, OfflineGenderId, 0, 0, 0, 0, 0);
+			}
+			UE_LOG(LogWowGameMode, Log, TEXT("Applied offline player model with %d starter equipment entries"),
+				StarterEquipment.Num());
+		}
+	}
+
+    // Auto-login + gameplay controller binding
+    if (!bOfflineWorld)
+    {
+        if (UGameInstance* GI = GetGameInstance())
+        {
+            if (UWowAutoLogin* AutoLogin = GI->GetSubsystem<UWowAutoLogin>())
             {
-                if (UWowConnectionManager* CM = AutoLogin->GetConnectionManager())
+                AutoLogin->TryAutoLogin();
+                if (AWowGameplayController* GPC = Cast<AWowGameplayController>(UGameplayStatics::GetPlayerController(this, 0)))
                 {
-                    GPC->ConnectionManager = CM;
-                    GPC->BindEntityEvents();
+                    if (UWowConnectionManager* CM = AutoLogin->GetConnectionManager())
+                    {
+                        GPC->ConnectionManager = CM;
+                        GPC->BindEntityEvents();
+                    }
                 }
             }
         }
@@ -440,8 +720,6 @@ void AWowViewerGameMode::SetupLoginScene(UWorld* World)
             FVector::ZeroVector, FRotator::ZeroRotator, SkyParams);
     }
 
-    SpawnDirectionalLight(World);
-
     // Spawn WorldManager early for MPQ access (streaming is disabled by default,
     // will be enabled by LoginController when entering the world)
     AWowWorldManager* WorldMgr = SpawnWorldManager(World);
@@ -457,6 +735,22 @@ void AWowViewerGameMode::SetupLoginScene(UWorld* World)
     if (LoginCtrl)
     {
         LoginCtrl->WorldManager = WorldMgr;
+        if (FParse::Param(FCommandLine::Get(), TEXT("charactercreatepreview")))
+        {
+            LoginCtrl->ShowCharacterCreatePreviewForTesting();
+        }
+        else if (FParse::Param(FCommandLine::Get(), TEXT("characterselectpreview")))
+        {
+            LoginCtrl->ShowCharacterSelectPreviewForTesting();
+        }
+        else if (FParse::Param(FCommandLine::Get(), TEXT("loadingscreenpreview")))
+        {
+            LoginCtrl->ShowLoadingScreenForTesting();
+        }
+        else if (FParse::Param(FCommandLine::Get(), TEXT("offlineloading")))
+        {
+            LoginCtrl->StartOfflineWorldLoadingForTesting();
+        }
     }
 }
 
@@ -508,6 +802,7 @@ void AWowViewerGameMode::SetupNetworkTestScene(UWorld* World)
         }
     }
 
+    Cred.Password = UWowCredentialStore::ResolvePassword(Cred);
     if (Cred.Username.IsEmpty() || Cred.Password.IsEmpty())
     {
         UE_LOG(LogWowGameMode, Error, TEXT("[NETTEST] FAIL: Credential has empty username or password"));

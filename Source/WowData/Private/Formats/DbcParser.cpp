@@ -1,4 +1,5 @@
 #include "Formats/DbcParser.h"
+#include "WowLocale.h"
 DEFINE_LOG_CATEGORY_STATIC(LogDbc, Log, All);
 
 #pragma pack(push,1)
@@ -40,4 +41,12 @@ FString FDbcParser::GetString(uint32 Rec, uint32 Fld) const
     uint32 Off = GetUInt(Rec, Fld);
     if (Off >= StringBlockSize) return FString();
     return FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(StringBlock + Off)));
+}
+
+FString FDbcParser::GetLocalizedString(uint32 Record, uint32 FirstField) const
+{
+    const uint32 Index = WowLocale::DbcIndex();
+    FString Result = GetString(Record, FirstField + Index);
+    if (Result.IsEmpty()) Result = GetString(Record, FirstField);
+    return Result;
 }

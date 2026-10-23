@@ -6,6 +6,15 @@ bool FMapDbc::Load(const FDbcParser& Parser)
 {
     if (!Parser.IsValid()) return false;
 
+    constexpr uint32 RequiredFieldCount = 66;
+    if (Parser.GetFieldCount() < RequiredFieldCount)
+    {
+        UE_LOG(LogMapDbc, Error,
+            TEXT("Map.dbc has %u fields, but the 3.3.5a layout requires at least %u"),
+            Parser.GetFieldCount(), RequiredFieldCount);
+        return false;
+    }
+
     Entries.Reserve(Parser.GetRecordCount());
     for (uint32 i = 0; i < Parser.GetRecordCount(); ++i)
     {
@@ -14,8 +23,8 @@ bool FMapDbc::Load(const FDbcParser& Parser)
         E.InternalName = Parser.GetString(i, 1);
         E.MapType      = Parser.GetUInt(i, 2);
         E.Flags        = Parser.GetUInt(i, 3);
-        E.Name         = Parser.GetString(i, 5);
-        E.LoadingScreenID = Parser.GetUInt(i, 21);
+        E.Name         = Parser.GetLocalizedString(i, 5);
+        E.LoadingScreenID = Parser.GetUInt(i, 57);
         E.LinkedZone   = Parser.GetUInt(i, 22);
         E.ExpansionID  = Parser.GetUInt(i, 63);
         E.MaxPlayers   = Parser.GetUInt(i, 65);

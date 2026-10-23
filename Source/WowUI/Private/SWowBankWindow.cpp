@@ -1,4 +1,5 @@
 #include "SWowBankWindow.h"
+#include "WowWindowStyle.h"
 
 #include "WowInventoryManager.h"
 #include "Styling/AppStyle.h"
@@ -210,9 +211,7 @@ void SWowBankWindow::Construct(const FArguments& InArgs, TSharedPtr<FWowInventor
 
     ChildSlot
     [
-        SNew(SBorder)
-        .BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder"))
-        .BorderBackgroundColor(FLinearColor(0.04f, 0.04f, 0.06f, 0.94f))
+        SNew(SWowWindowFrame)
         .Padding(10.0f)
         [
             SNew(SVerticalBox)
@@ -233,7 +232,7 @@ void SWowBankWindow::Construct(const FArguments& InArgs, TSharedPtr<FWowInventor
                 + SHorizontalBox::Slot()
                 .AutoWidth()
                 [
-                    SNew(SButton)
+                    SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .Text(NSLOCTEXT("WowUI", "CloseBank", "X"))
                     .OnClicked(this, &SWowBankWindow::OnCloseClicked)
                 ]
@@ -263,7 +262,7 @@ void SWowBankWindow::Construct(const FArguments& InArgs, TSharedPtr<FWowInventor
 
     if (InventoryManager.IsValid())
     {
-        InventoryManager->OnInventoryChanged.AddRaw(this, &SWowBankWindow::OnInventoryChanged);
+        InventoryManager->OnInventoryChanged.AddSP(this, &SWowBankWindow::OnInventoryChanged);
     }
 
     Hide();

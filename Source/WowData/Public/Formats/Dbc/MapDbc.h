@@ -9,7 +9,7 @@ struct FMapDbcEntry
     uint32 MapType;       // 2 (0=normal, 1=instance, 2=raid, 3=BG, 4=arena)
     uint32 Flags;         // 3
     FString Name;         // 5 (localized, enUS)
-    uint32 LoadingScreenID; // 21 - references LoadingScreens.dbc
+    uint32 LoadingScreenID; // 57 - references LoadingScreens.dbc
     uint32 LinkedZone;    // 22
     uint32 ExpansionID;   // 63
     uint32 MaxPlayers;    // 65

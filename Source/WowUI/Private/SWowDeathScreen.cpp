@@ -1,4 +1,5 @@
 #include "SWowDeathScreen.h"
+#include "WowWindowStyle.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SConstraintCanvas.h"
@@ -13,12 +14,6 @@
 void SWowDeathScreen::Construct(const FArguments& InArgs)
 {
     OnReleaseSpirit = InArgs._OnReleaseSpirit;
-
-    // WoW gold button color style
-    const FButtonStyle WowButtonStyle = FButtonStyle()
-        .SetNormal(FSlateColorBrush(FLinearColor(0.2f, 0.15f, 0.0f, 0.9f))) // Dark gold background
-        .SetHovered(FSlateColorBrush(FLinearColor(0.35f, 0.25f, 0.0f, 0.9f))) // Lighter gold on hover
-        .SetPressed(FSlateColorBrush(FLinearColor(0.15f, 0.1f, 0.0f, 0.9f))); // Darker when pressed
 
     ChildSlot
     [
@@ -62,7 +57,7 @@ void SWowDeathScreen::Construct(const FArguments& InArgs)
                 [
                     // Release Spirit button
                     SNew(SButton)
-                    .ButtonStyle(&WowButtonStyle)
+                    .ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                     .OnClicked(this, &SWowDeathScreen::HandleReleaseSpiritClicked)
                     .ContentPadding(FMargin(30, 10))
                     [

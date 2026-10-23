@@ -1,3 +1,5 @@
+#include "Formats/Dbc/EmotesDbc.h"
+#include "Formats/Dbc/EmotesTextDbc.h"
 #include "Misc/AutomationTest.h"
 #include "Mpq/MpqManager.h"
 #include "Formats/DbcParser.h"
@@ -10,6 +12,15 @@
 #include "Formats/WmoParser.h"
 #include "Formats/WmoTypes.h"
 #include "Coord/WowCoordinate.h"
+#include "WowTextureFactory.h"
+#include "Engine/Texture2D.h"
+#include "Engine/StaticMesh.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "WowWaterMaterial.h"
+#include "WowWaterRenderer.h"
+#include "WowDoodadManager.h"
+#include "WowAssetCache.h"
 
 #define private public
 #include "WowConnectionManager.h"
@@ -30,6 +41,113 @@ extern "C" {
 }
 #endif
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPacketReaderRejectsTruncatedFields,
+    "WowUnreal.Network.Security.PacketReaderRejectsTruncatedFields",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FPacketReaderRejectsTruncatedFields::RunTest(const FString& Parameters)
+{
+    TArray<uint8> TruncatedInteger = { 0x12, 0x34, 0x56 };
+    FPacketReader IntegerReader(TruncatedInteger);
+    TestEqual(TEXT("Truncated uint32 returns no partial value"), IntegerReader.ReadU32(), 0u);
+    TestTrue(TEXT("Truncated uint32 marks the reader failed"), IntegerReader.HasFailed());
+    TestEqual(TEXT("Failed fixed-width read does not advance the cursor"), IntegerReader.Pos, 0);
+
+    TArray<uint8> UnterminatedString = { 'n', 'a', 'm', 'e' };
+    FPacketReader StringReader(UnterminatedString);
+    TestEqual(TEXT("Unterminated string is rejected"), StringReader.ReadCString(), FString());
+    TestTrue(TEXT("Unterminated string marks the reader failed"), StringReader.HasFailed());
+    TestEqual(TEXT("Failed string read restores the cursor"), StringReader.Pos, 0);
+
+    TArray<uint8> TruncatedGuid = { 0x03, 0xAA };
+    FPacketReader GuidReader(TruncatedGuid);
+    TestEqual(TEXT("Truncated packed GUID returns no partial GUID"), GuidReader.ReadPackedGuid(), 0ULL);
+    TestTrue(TEXT("Truncated packed GUID marks the reader failed"), GuidReader.HasFailed());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPacketHandlerRejectsTruncatedRequiredPayload,
+    "WowUnreal.Network.Security.PacketHandlerRejectsTruncatedRequiredPayload",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FPacketHandlerRejectsTruncatedRequiredPayload::RunTest(const FString& Parameters)
+{
+    FWowPacketHandler Handler;
+    bool bWorldPositionBroadcast = false;
+    bool bOpcodeBroadcast = false;
+    Handler.OnLoginVerifyWorld.AddLambda(
+        [&bWorldPositionBroadcast](uint32, float, float, float, float)
+        {
+            bWorldPositionBroadcast = true;
+        });
+    Handler.OnOpcodeReceived.AddLambda(
+        [&bOpcodeBroadcast](uint16)
+        {
+            bOpcodeBroadcast = true;
+        });
+
+    TArray<uint8> TruncatedLoginPayload;
+    TruncatedLoginPayload.SetNumZeroed(12); // LOGIN_VERIFY_WORLD requires 20 bytes.
+    Handler.HandlePacket(WowOpcode::SMSG_LOGIN_VERIFY_WORLD, TruncatedLoginPayload);
+
+    TestFalse(TEXT("Malformed login payload does not publish a world position"), bWorldPositionBroadcast);
+    TestFalse(TEXT("Malformed packet does not reach gameplay/UI opcode subscribers"), bOpcodeBroadcast);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FContactList335PacketLayout,
+    "WowUnreal.Network.ContactList335PacketLayout",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FContactList335PacketLayout::RunTest(const FString& Parameters)
+{
+    FWowPacketHandler PacketHandler;
+    TArray<uint8> Packet;
+    auto AppendU8 = [](TArray<uint8>& Buffer, uint8 Value) { Buffer.Add(Value); };
+    auto AppendU32 = [](TArray<uint8>& Buffer, uint32 Value)
+    {
+        const int32 Offset = Buffer.AddUninitialized(sizeof(Value));
+        FMemory::Memcpy(Buffer.GetData() + Offset, &Value, sizeof(Value));
+    };
+    auto AppendU64 = [](TArray<uint8>& Buffer, uint64 Value)
+    {
+        const int32 Offset = Buffer.AddUninitialized(sizeof(Value));
+        FMemory::Memcpy(Buffer.GetData() + Offset, &Value, sizeof(Value));
+    };
+    auto AppendCString = [](TArray<uint8>& Buffer, const ANSICHAR* Value)
+    {
+        const int32 Length = FCStringAnsi::Strlen(Value) + 1;
+        const int32 Offset = Buffer.AddUninitialized(Length);
+        FMemory::Memcpy(Buffer.GetData() + Offset, Value, Length);
+    };
+
+    constexpr uint64 FriendGuid = 0x0000000000001234ULL;
+    constexpr uint64 IgnoredGuid = 0x0000000000005678ULL;
+    AppendU32(Packet, 0x3u); // requested friends + ignores
+    AppendU32(Packet, 2u);
+    AppendU64(Packet, FriendGuid);
+    AppendU32(Packet, 0x1u);
+    AppendCString(Packet, "tank friend");
+    AppendU8(Packet, 1u);
+    AppendU32(Packet, 12u);
+    AppendU32(Packet, 80u);
+    AppendU32(Packet, 1u);
+    AppendU64(Packet, IgnoredGuid);
+    AppendU32(Packet, 0x2u);
+    AppendCString(Packet, "ignored note");
+
+    PacketHandler.HandlePacket(WowOpcode::SMSG_FRIEND_LIST, Packet);
+    TestEqual(TEXT("Both 3.3.5 contacts are parsed"), PacketHandler.FriendsList.Num(), 2);
+    if (PacketHandler.FriendsList.Num() == 2)
+    {
+        const FWowFriendInfo& Friend = PacketHandler.FriendsList[0];
+        const FWowFriendInfo& Ignored = PacketHandler.FriendsList[1];
+        TestEqual(TEXT("Friend GUID stays aligned"), Friend.Guid, FriendGuid);
+        TestEqual(TEXT("Friend flag is preserved"), Friend.Flags, 0x1u);
+        TestEqual(TEXT("Online friend level uses uint32 wire field"), Friend.Level, static_cast<uint8>(80));
+        TestEqual(TEXT("Ignore GUID stays aligned"), Ignored.Guid, IgnoredGuid);
+        TestEqual(TEXT("Ignore flag is preserved"), Ignored.Flags, 0x2u);
+        TestEqual(TEXT("Ignore note is parsed"), Ignored.Note, FString(TEXT("ignored note")));
+    }
+    return true;
+}
 struct FWowLuaContext
 {
     class FWowEntityManager* EntityManager = nullptr;
@@ -41,6 +159,17 @@ struct FWowLuaContext
 // ---- Helper: shared MPQ manager for data-driven tests ----
 namespace WowTestUtils
 {
+    static void InventoryFixture(UWowConnectionManager& C)
+    {
+        auto& EM=C.PacketHandler.EntityManager;EM.LocalPlayerGuid=1;
+        auto& P=EM.PromoteToTyped(1,WowTypeMask::OBJECT|WowTypeMask::UNIT|WowTypeMask::PLAYER);
+        P.SetField(PlayerField::PACK_SLOT_START+4,2);P.SetField(PlayerField::PACK_SLOT_START+5,0);
+        auto& I=EM.PromoteToTyped(2,WowTypeMask::OBJECT|WowTypeMask::ITEM);
+        I.Entry=6948;I.SetField(ItemField::OWNER,1);I.SetField(ItemField::STACK_COUNT,1);
+        auto& Info=C.PacketHandler.ItemTemplates.FindOrAdd(6948);
+        Info.Name=TEXT("Test weapon");Info.InventoryType=13;Info.Quality=3;
+    }
+
     static FMpqManager& GetMpq()
     {
         static FMpqManager Mpq;
@@ -71,6 +200,8 @@ namespace WowTestUtils
         Connection.State = EWowSessionState::WorldInGame;
         Connection.TargetGuid = TargetGuid;
         Connection.WorldSocket = MakeShared<FWowWorldSocket>();
+        // Queue-only test transport: no OS socket or worker is started.
+        Connection.WorldSocket->bRunning = true;
         return Connection.WorldSocket;
     }
 
@@ -184,6 +315,35 @@ bool FCoordWowRoundtrip::RunTest(const FString& Parameters)
     TestTrue(TEXT("WoW X roundtrips"), FMath::IsNearlyEqual(Back.X, WowPos.X, 0.01f));
     TestTrue(TEXT("WoW Y roundtrips"), FMath::IsNearlyEqual(Back.Y, WowPos.Y, 0.01f));
     TestTrue(TEXT("WoW Z roundtrips"), FMath::IsNearlyEqual(Back.Z, WowPos.Z, 0.01f));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCoordMovementOrientation, "WowUnreal.Coord.MovementOrientation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FCoordMovementOrientation::RunTest(const FString& Parameters)
+{
+    const TArray<FVector> WowDirections = {
+        FVector(1.0f, 0.0f, 0.0f),
+        FVector(0.0f, 1.0f, 0.0f),
+        FVector(-1.0f, 0.0f, 0.0f),
+        FVector(0.0f, -1.0f, 0.0f)
+    };
+
+    for (const FVector& WowDirection : WowDirections)
+    {
+        const float WowOrientation = FMath::Atan2(WowDirection.Y, WowDirection.X);
+        const float UEYaw = FWowCoordinate::WowOrientationToUEYaw(WowOrientation);
+        const FVector UEForward = FRotator(0.0f, UEYaw, 0.0f).Vector().GetSafeNormal2D();
+        const FVector ExpectedUEForward(WowDirection.X, -WowDirection.Y, 0.0f);
+        TestTrue(TEXT("Converted actor forward follows the converted movement direction"),
+            FVector::DotProduct(UEForward, ExpectedUEForward.GetSafeNormal2D()) > 0.999f);
+        TestTrue(TEXT("Orientation roundtrips between WoW and Unreal"),
+            FMath::IsNearlyEqual(
+                FMath::UnwindRadians(FWowCoordinate::UEYawToWowOrientation(UEYaw) - WowOrientation),
+                0.0f,
+                0.0001f));
+    }
+
     return true;
 }
 
@@ -301,6 +461,124 @@ bool FEntityTypedPromotion::RunTest(const FString& Parameters)
 
     EM.LocalPlayerGuid = 777;
     TestEqual(TEXT("Local player lookup is typed"), EM.GetLocalPlayer(), Player);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMonsterMoveFacingAndPath,
+    "WowUnreal.Network.MonsterMoveFacingAndPath",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FMonsterMoveFacingAndPath::RunTest(const FString& Parameters)
+{
+    FWowPacketHandler Handler;
+    constexpr uint64 MovingGuid = 1;
+    constexpr uint64 FacingTargetGuid = 2;
+    Handler.EntityManager.GetOrCreate(MovingGuid);
+    Handler.EntityManager.GetOrCreate(FacingTargetGuid).Movement.Position = FVector(20.0f, 0.0f, 0.0f);
+
+    auto AppendU8 = [](TArray<uint8>& Buffer, uint8 Value) { Buffer.Add(Value); };
+    auto AppendU32 = [](TArray<uint8>& Buffer, uint32 Value)
+    {
+        const int32 Offset = Buffer.AddUninitialized(sizeof(Value));
+        FMemory::Memcpy(Buffer.GetData() + Offset, &Value, sizeof(Value));
+    };
+    auto AppendU64 = [](TArray<uint8>& Buffer, uint64 Value)
+    {
+        const int32 Offset = Buffer.AddUninitialized(sizeof(Value));
+        FMemory::Memcpy(Buffer.GetData() + Offset, &Value, sizeof(Value));
+    };
+    auto AppendFloat = [](TArray<uint8>& Buffer, float Value)
+    {
+        const int32 Offset = Buffer.AddUninitialized(sizeof(Value));
+        FMemory::Memcpy(Buffer.GetData() + Offset, &Value, sizeof(Value));
+    };
+    auto AppendPackedGuid = [&AppendU8](TArray<uint8>& Buffer, uint64 Guid)
+    {
+        uint8 Mask = 0;
+        TArray<uint8> Bytes;
+        for (uint8 ByteIndex = 0; ByteIndex < 8; ++ByteIndex)
+        {
+            const uint8 ByteValue = static_cast<uint8>((Guid >> (ByteIndex * 8)) & 0xFF);
+            if (ByteValue != 0)
+            {
+                Mask |= static_cast<uint8>(1u << ByteIndex);
+                Bytes.Add(ByteValue);
+            }
+        }
+        AppendU8(Buffer, Mask);
+        Buffer.Append(Bytes);
+    };
+    auto AppendHeader = [&](TArray<uint8>& Buffer, uint8 MoveType, uint32 SplineId)
+    {
+        AppendPackedGuid(Buffer, MovingGuid);
+        AppendU8(Buffer, 0);
+        AppendFloat(Buffer, 0.0f);
+        AppendFloat(Buffer, 0.0f);
+        AppendFloat(Buffer, 0.0f);
+        AppendU32(Buffer, SplineId);
+        AppendU8(Buffer, MoveType);
+    };
+    auto AppendSinglePointSpline = [&](TArray<uint8>& Buffer, const FVector& Destination)
+    {
+        AppendU32(Buffer, 0);
+        AppendU32(Buffer, 1000);
+        AppendU32(Buffer, 1);
+        AppendFloat(Buffer, Destination.X);
+        AppendFloat(Buffer, Destination.Y);
+        AppendFloat(Buffer, Destination.Z);
+    };
+
+    TArray<uint8> FacingTargetPacket;
+    AppendHeader(FacingTargetPacket, 3, 100);
+    AppendU64(FacingTargetPacket, FacingTargetGuid);
+    AppendSinglePointSpline(FacingTargetPacket, FVector(10.0f, 0.0f, 0.0f));
+    Handler.HandlePacket(WowOpcode::SMSG_MONSTER_MOVE, FacingTargetPacket);
+
+    FWowEntity* Entity = Handler.EntityManager.Find(MovingGuid);
+    TestNotNull(TEXT("Moving entity remains available"), Entity);
+    if (!Entity)
+    {
+        return false;
+    }
+    TestEqual(TEXT("Move type 3 is parsed as a facing target"), Entity->Movement.SplineMoveType, static_cast<uint8>(3));
+    TestEqual(TEXT("Facing target GUID stays aligned"), Entity->Movement.SplineFacingTargetGuid, FacingTargetGuid);
+    TestTrue(TEXT("Facing-target packets still carry an active movement spline"), Entity->Movement.bHasActiveSpline);
+    TestEqual(TEXT("Facing-target destination is parsed"), Entity->Movement.SplineWaypoints.Num(), 1);
+
+    TArray<uint8> FacingAnglePacket;
+    AppendHeader(FacingAnglePacket, 4, 101);
+    AppendFloat(FacingAnglePacket, 1.25f);
+    AppendSinglePointSpline(FacingAnglePacket, FVector(0.0f, 10.0f, 0.0f));
+    Handler.HandlePacket(WowOpcode::SMSG_MONSTER_MOVE, FacingAnglePacket);
+    TestEqual(TEXT("Move type 4 is parsed as a facing angle"), Entity->Movement.SplineMoveType, static_cast<uint8>(4));
+    TestTrue(TEXT("Facing angle stays aligned"), FMath::IsNearlyEqual(Entity->Movement.SplineFacingAngle, 1.25f));
+
+    TArray<uint8> PackedLinearPacket;
+    AppendHeader(PackedLinearPacket, 0, 102);
+    AppendU32(PackedLinearPacket, 0);
+    AppendU32(PackedLinearPacket, 1000);
+    AppendU32(PackedLinearPacket, 2);
+    AppendFloat(PackedLinearPacket, 10.0f);
+    AppendFloat(PackedLinearPacket, 10.0f);
+    AppendFloat(PackedLinearPacket, 0.0f);
+
+    const int32 PackedX = 8;
+    const int32 PackedY = -8;
+    const uint32 PackedPoint =
+        (static_cast<uint32>(PackedX) & 0x7FF) |
+        ((static_cast<uint32>(PackedY) & 0x7FF) << 11);
+    AppendU32(PackedLinearPacket, PackedPoint);
+    Handler.HandlePacket(WowOpcode::SMSG_MONSTER_MOVE, PackedLinearPacket);
+
+    TestEqual(TEXT("Linear packet resolves its intermediate and final points"),
+        Entity->Movement.SplineWaypoints.Num(), 2);
+    if (Entity->Movement.SplineWaypoints.Num() == 2)
+    {
+        TestTrue(TEXT("Packed midpoint offset uses the server's midpoint-minus-offset convention"),
+            Entity->Movement.SplineWaypoints[0].Position.Equals(FVector(3.0f, 7.0f, 0.0f), 0.01f));
+        TestTrue(TEXT("Linear destination remains the last waypoint"),
+            Entity->Movement.SplineWaypoints[1].Position.Equals(FVector(10.0f, 10.0f, 0.0f), 0.01f));
+    }
 
     return true;
 }
@@ -430,6 +708,7 @@ bool FItemCursorTracksBagItemPickup::RunTest(const FString& Parameters)
         return false;
     }
 
+    WowTestUtils::InventoryFixture(*Connection);
     Connection->PickupBagItemCursor(255, 2, 6948, TEXT("|cffffffff|Hitem:6948:0:0:0:0:0:0:0:0:0|h[Item 6948]|h|r"));
 
     FString CursorType;
@@ -471,7 +750,9 @@ bool FLuaUseContainerItemQueuesAutoEquip::RunTest(const FString& Parameters)
         return false;
     }
 
+    WowTestUtils::InventoryFixture(*Connection);
     FWowLuaContext Context;
+    Context.EntityManager = &Connection->PacketHandler.EntityManager;
     Context.ConnectionManager = Connection;
     WowTestUtils::SetLuaContext(LuaVM, Context);
 
@@ -489,10 +770,42 @@ bool FLuaUseContainerItemQueuesAutoEquip::RunTest(const FString& Parameters)
         if (Payload.Num() == 2)
         {
             TestEqual(TEXT("Backpack bag id normalizes to 255"), Payload[0], static_cast<uint8>(255));
-            TestEqual(TEXT("Lua bag slots convert to zero-based server slots"), Payload[1], static_cast<uint8>(2));
+            TestEqual(TEXT("Lua backpack slot 3 maps to server inventory slot 25"), Payload[1], static_cast<uint8>(25));
         }
     }
 
+    // Vendor context takes priority over equip, including a BoE weapon.
+    Connection->PacketHandler.ActiveVendorGuid=99;
+    LuaVM.ExecuteString(TEXT("UseContainerItem(0, 3)"));
+    TestTrue(TEXT("Vendor right-click sends a packet"),WowTestUtils::DequeueClientPacket(*WorldSocket,Opcode,Payload));
+    TestEqual(TEXT("Vendor right-click sells"),Opcode,uint32(WowOpcode::CMSG_SELL_ITEM));
+    TestEqual(TEXT("Sell contains full GUIDs and count"),Payload.Num(),20);
+    Connection->PacketHandler.ActiveVendorGuid=0;
+    auto& Info=Connection->PacketHandler.ItemTemplates[6948];Info.Bonding=2;
+    uint32 Token=0;
+    Connection->OnItemConfirmation.AddLambda([&](const FString& Event,const TArray<FString>& Args){if(Event.Contains(TEXT("EQUIP")))Token=FCString::Atoi(*Args[0]);});
+    LuaVM.ExecuteString(TEXT("UseContainerItem(0, 3)"));
+    TestTrue(TEXT("BoE produces confirmation token"),Token>0);
+    TestFalse(TEXT("BoE cannot reach server before confirmation"),WowTestUtils::DequeueClientPacket(*WorldSocket,Opcode,Payload));
+    LuaVM.ExecuteString(FString::Printf(TEXT("EquipPendingItem(%u)"),Token));
+    TestTrue(TEXT("Confirm sends equip"),WowTestUtils::DequeueClientPacket(*WorldSocket,Opcode,Payload));
+    TestEqual(TEXT("Confirmed opcode"),Opcode,uint32(WowOpcode::CMSG_AUTOEQUIP_ITEM));
+    // Simulate the server binding the item; drag to offhand must retain that exact destination.
+    Connection->PacketHandler.EntityManager.FindItem(2)->SetField(ItemField::FLAGS,1);
+    LuaVM.ExecuteString(TEXT("PickupContainerItem(0, 3); PickupInventoryItem(17)"));
+    TestTrue(TEXT("Drag sends swap"),WowTestUtils::DequeueClientPacket(*WorldSocket,Opcode,Payload));
+    TestEqual(TEXT("Drag uses targeted swap"),Opcode,uint32(WowOpcode::CMSG_SWAP_ITEM));
+    TestTrue(TEXT("Destination first, offhand 16, backpack source 25"),Payload==TArray<uint8>({255,16,255,25}));
+    LuaVM.ExecuteString(TEXT("PickupContainerItem(0, 3)"));
+    Connection->RequestDeleteCursorItem();
+    TestFalse(TEXT("World drop does not send destroy"),WowTestUtils::DequeueClientPacket(*WorldSocket,Opcode,Payload));
+    LuaVM.ExecuteString(TEXT("ClearCursor(); DeleteCursorItem()"));
+    TestFalse(TEXT("Cancel cannot destroy"),WowTestUtils::DequeueClientPacket(*WorldSocket,Opcode,Payload));
+    LuaVM.ExecuteString(TEXT("PickupContainerItem(0, 3)"));
+    Connection->RequestDeleteCursorItem();LuaVM.ExecuteString(TEXT("DeleteCursorItem()"));
+    TestTrue(TEXT("Confirmed destroy sends"),WowTestUtils::DequeueClientPacket(*WorldSocket,Opcode,Payload));
+    TestEqual(TEXT("Destroy opcode"),Opcode,uint32(WowOpcode::CMSG_DESTROYITEM));
+    TestTrue(TEXT("Destroy addresses backpack slot 25"),Payload==TArray<uint8>({255,25,0,0,0,0}));
     WowTestUtils::ClearLuaContext(LuaVM);
     LuaVM.Shutdown();
     return true;
@@ -1879,9 +2192,9 @@ bool FLuaUiUtilityGlobalsExist::RunTest(const FString& Parameters)
     lua_pushinteger(L, 1);
     const int AdvanceEntryResult = lua_pcall(L, 1, 8, 0);
     TestEqual(TEXT("CombatLogAdvanceEntry accepts a numeric delta"), AdvanceEntryResult, 0);
-    const bool bAdvanceEntryHasStringEvent = lua_isstring(L, -7);
+    const bool bAdvanceEntryHasStringEvent = lua_isstring(L, -7) != 0;
     const FString AdvancedEventName = bAdvanceEntryHasStringEvent ? UTF8_TO_TCHAR(lua_tostring(L, -7)) : FString();
-    const bool bAdvanceEntryHasNumericSourceFlags = lua_isnumber(L, -4);
+    const bool bAdvanceEntryHasNumericSourceFlags = lua_isnumber(L, -4) != 0;
     const int32 AdvancedSourceFlags = bAdvanceEntryHasNumericSourceFlags ? static_cast<int32>(lua_tointeger(L, -4)) : 0;
     lua_pop(L, 8);
     TestTrue(TEXT("CombatLogAdvanceEntry returns a WotLK event tuple"), bAdvanceEntryHasStringEvent);
@@ -1899,9 +2212,9 @@ bool FLuaUiUtilityGlobalsExist::RunTest(const FString& Parameters)
     lua_getglobal(L, "CombatLogGetCurrentEntry");
     const int GetCurrentEntryResult = lua_pcall(L, 0, 8, 0);
     TestEqual(TEXT("CombatLogGetCurrentEntry call succeeds"), GetCurrentEntryResult, 0);
-    const bool bCurrentEntryHasStringEvent = lua_isstring(L, -7);
+    const bool bCurrentEntryHasStringEvent = lua_isstring(L, -7) != 0;
     const FString CurrentEntryEventName = bCurrentEntryHasStringEvent ? UTF8_TO_TCHAR(lua_tostring(L, -7)) : FString();
-    const bool bCurrentEntryHasNumericDestFlags = lua_isnumber(L, -1);
+    const bool bCurrentEntryHasNumericDestFlags = lua_isnumber(L, -1) != 0;
     const int32 CurrentDestFlags = bCurrentEntryHasNumericDestFlags ? static_cast<int32>(lua_tointeger(L, -1)) : 0;
     lua_pop(L, 8);
     TestTrue(TEXT("CombatLogGetCurrentEntry returns a WotLK event tuple"), bCurrentEntryHasStringEvent);
@@ -2856,6 +3169,48 @@ bool FBlpParserDxt::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBlpRuntimeMipChain,
+	"WowUnreal.Assets.BLP.RuntimeMipChain",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FBlpRuntimeMipChain::RunTest(const FString& Parameters)
+{
+	FBlpTexture Source;
+	Source.bIsValid = true;
+	Source.Width = 4;
+	Source.Height = 4;
+	Source.PixelFormat = EBlpPixelFormat::RGBA8;
+
+	for (const FIntPoint Size : {FIntPoint(4, 4), FIntPoint(2, 2), FIntPoint(1, 1)})
+	{
+		FBlpMipLevel& Mip = Source.MipLevels.AddDefaulted_GetRef();
+		Mip.Width = Size.X;
+		Mip.Height = Size.Y;
+		Mip.Data.Init(static_cast<uint8>(40 + Source.MipLevels.Num()), Size.X * Size.Y * 4);
+	}
+
+	UTexture2D* RuntimeTexture = FWowTextureFactory::CreateTexture(Source, TEXT("AutomationMipChain"));
+	TestNotNull(TEXT("Runtime texture created"), RuntimeTexture);
+	if (!RuntimeTexture || !RuntimeTexture->GetPlatformData())
+	{
+		return false;
+	}
+
+	TestEqual(TEXT("All authored mip levels uploaded"),
+		RuntimeTexture->GetPlatformData()->Mips.Num(), Source.MipLevels.Num());
+	for (int32 MipIndex = 0; MipIndex < Source.MipLevels.Num(); ++MipIndex)
+	{
+		const FTexture2DMipMap& RuntimeMip = RuntimeTexture->GetPlatformData()->Mips[MipIndex];
+		TestEqual(FString::Printf(TEXT("Mip %d width"), MipIndex),
+			RuntimeMip.SizeX, static_cast<int32>(Source.MipLevels[MipIndex].Width));
+		TestEqual(FString::Printf(TEXT("Mip %d height"), MipIndex),
+			RuntimeMip.SizeY, static_cast<int32>(Source.MipLevels[MipIndex].Height));
+		TestEqual(FString::Printf(TEXT("Mip %d byte count"), MipIndex),
+			RuntimeMip.BulkData.GetBulkDataSize(),
+			static_cast<int64>(Source.MipLevels[MipIndex].Data.Num()));
+	}
+	return true;
+}
+
 // ====================================================================
 // ADT Parser Tests (require MPQ data)
 // ====================================================================
@@ -2939,6 +3294,42 @@ bool FM2ParserBasic::RunTest(const FString& Parameters)
     TestTrue(TEXT("M2 is valid"), Model.bIsValid);
     TestTrue(TEXT("Has vertices"), Model.Vertices.Num() > 0);
 
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FM2SpellRibbon335,
+    "WowUnreal.Parser.M2.SpellRibbon335",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FM2SpellRibbon335::RunTest(const FString& Parameters)
+{
+    FMpqManager& Mpq = WowTestUtils::GetMpq();
+    if (!Mpq.IsInitialized())
+    {
+        AddWarning(TEXT("MPQ not available — skipping"));
+        return true;
+    }
+
+    TArray<uint8> M2Data;
+    TArray<uint8> SkinData;
+    if (!Mpq.ReadFile(TEXT("Spells\\HolySmite_Low_Chest.m2"), M2Data))
+    {
+        AddWarning(TEXT("HolySmite spell model is not available — skipping"));
+        return true;
+    }
+    Mpq.ReadFile(TEXT("Spells\\HolySmite_Low_Chest00.skin"), SkinData);
+    const FM2Data Model = FM2Parser::Parse(M2Data, SkinData);
+    TestTrue(TEXT("Smite M2 is valid"), Model.bIsValid);
+    TestEqual(TEXT("Smite carries both authored light ribbons"), Model.RibbonEmitters.Num(), 2);
+    if (Model.RibbonEmitters.Num() == 2)
+    {
+        for (const FM2RibbonEmitter& Ribbon : Model.RibbonEmitters)
+        {
+            TestTrue(TEXT("Ribbon references a valid bone"), Model.Bones.IsValidIndex(Ribbon.Bone));
+            TestTrue(TEXT("Ribbon references a valid texture"), Model.TexturePaths.IsValidIndex(Ribbon.Texture));
+            TestTrue(TEXT("Ribbon has a positive edge rate"), Ribbon.EdgesPerSecond > 0.0f);
+            TestTrue(TEXT("Ribbon has a positive lifetime"), Ribbon.EdgeLifetime > 0.0f);
+        }
+    }
     return true;
 }
 
@@ -3322,6 +3713,44 @@ bool FMovementScaleConsistency::RunTest(const FString& Parameters)
 // ADT Area ID Tests (require MPQ data)
 // ====================================================================
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrameXmlChatHistoryScrolls, "WowUnreal.UI.FrameXmlChatHistoryScrolls",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FFrameXmlChatHistoryScrolls::RunTest(const FString& Parameters)
+{
+    UCanvasPanel* RootCanvas = NewObject<UCanvasPanel>();
+    FWowFrameManager FrameManager;
+    FrameManager.Initialize(RootCanvas);
+
+    FWowFrameDef ChatDef;
+    ChatDef.Name = TEXT("ChatHistoryTestFrame");
+    ChatDef.Type = EWowFrameType::ScrollingMessageFrame;
+    ChatDef.Width = 430.0f;
+    ChatDef.Height = 120.0f;
+    const int64 ChatHandle = FrameManager.CreateFrame(ChatDef);
+    TestTrue(TEXT("Scrolling message frame created"), ChatHandle > 0);
+
+    for (int32 Index = 1; Index <= 10; ++Index)
+    {
+        FrameManager.AddScrollingMessage(ChatHandle,
+            FString::Printf(TEXT("History line %d"), Index), FLinearColor::White);
+    }
+
+    TestEqual(TEXT("Chat retains messages beyond the seven visible rows"),
+        FrameManager.GetScrollingMessageCount(ChatHandle), 10);
+    TestTrue(TEXT("New chat starts at the bottom"), FrameManager.AreMessagesAtBottom(ChatHandle));
+
+    FrameManager.ScrollMessages(ChatHandle, 1);
+    TestFalse(TEXT("Scroll up leaves the bottom"), FrameManager.AreMessagesAtBottom(ChatHandle));
+    FrameManager.ScrollMessagesToTop(ChatHandle);
+    TestTrue(TEXT("Scroll-to-top reaches oldest retained row"), FrameManager.AreMessagesAtTop(ChatHandle));
+    FrameManager.ScrollMessagesToBottom(ChatHandle);
+    TestTrue(TEXT("Scroll-to-bottom returns to newest row"), FrameManager.AreMessagesAtBottom(ChatHandle));
+
+    FrameManager.ClearScrollingMessages(ChatHandle);
+    TestEqual(TEXT("Clear removes retained messages"), FrameManager.GetScrollingMessageCount(ChatHandle), 0);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAdtAreaIds, "WowUnreal.World.AdtAreaIds",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FAdtAreaIds::RunTest(const FString& Parameters)
@@ -3359,5 +3788,340 @@ bool FAdtAreaIds::RunTest(const FString& Parameters)
     uint32 FirstAreaId = Adt.Chunks[0].AreaId;
     TestTrue(TEXT("First chunk area ID > 0"), FirstAreaId > 0);
 
+    return true;
+}
+
+
+namespace WowWaterRegression
+{
+TArray<uint8> MakeAdt(uint16 Format, bool TruncateVertexData = false)
+{
+    auto Put = [](TArray<uint8>& Bytes, int32 Offset, auto Value)
+    {
+        FMemory::Memcpy(Bytes.GetData() + Offset, &Value, sizeof(Value));
+    };
+    TArray<uint8> Water;
+    constexpr uint32 Instances = 256 * 12;
+    constexpr uint32 Mask = Instances + 48;
+    constexpr uint32 VertexData = Mask + 1;
+    Water.SetNumZeroed(VertexData);
+    Put(Water, 0, Instances); Put(Water, 4, uint32(2));
+    Put(Water, Instances, uint16(1)); Put(Water, Instances + 2, Format);
+    Put(Water, Instances + 4, 20.0f); Put(Water, Instances + 8, 30.0f);
+    Water[Instances + 12] = 2; Water[Instances + 13] = 3;
+    Water[Instances + 14] = 2; Water[Instances + 15] = 1;
+    Put(Water, Instances + 16, Mask); Put(Water, Instances + 20, VertexData);
+    Water[Mask] = 2; // Only the second cell of an offset 2x1 rectangle.
+    Put(Water, Instances + 24, uint16(1));
+    Put(Water, Instances + 28, 8.0f); Put(Water, Instances + 32, 8.0f);
+    Water[Instances + 38] = 1; Water[Instances + 39] = 1; // Flat second layer, no arrays.
+    auto Append = [](TArray<uint8>& Bytes, auto Value)
+    {
+        const int32 Offset = Bytes.AddUninitialized(sizeof(Value));
+        FMemory::Memcpy(Bytes.GetData() + Offset, &Value, sizeof(Value));
+    };
+    if (Format != 2) for (int32 I = 0; I < 6; ++I) Append(Water, 21.0f + I);
+    if (Format == 1 || Format == 3)
+        for (int32 I = 0; I < 6; ++I) { Append(Water, uint16(8192 + I)); Append(Water, uint16(16384 + I)); }
+    if (Format != 1) for (int32 I = 0; I < 6; ++I) Append(Water, uint8(10 + 10 * I));
+    if (TruncateVertexData) Water.Pop();
+
+    TArray<uint8> Bytes;
+    Bytes.SetNumZeroed(84);
+    Put(Bytes, 0, uint32(0x4D564552)); Put(Bytes, 4, uint32(4)); Put(Bytes, 8, uint32(18));
+    Put(Bytes, 12, uint32(0x4D484452)); Put(Bytes, 16, uint32(64));
+    Put(Bytes, 20 + 40, uint32(64)); // MHDR offset is relative to its payload.
+    Append(Bytes, uint32(0x4D48324F)); Append(Bytes, uint32(Water.Num())); Bytes.Append(Water);
+    for (int32 I = 0; I < 256; ++I)
+    {
+        Append(Bytes, uint32(0x4D434E4B)); Append(Bytes, uint32(128));
+        const int32 Header = Bytes.AddZeroed(128);
+        Put(Bytes, Header + 4, uint32(I % 16)); Put(Bytes, Header + 8, uint32(I / 16));
+    }
+    return Bytes;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWaterPlanarVertexData,
+    "WowUnreal.Water.PlanarVertexData", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FWaterPlanarVertexData::RunTest(const FString& Parameters)
+{
+    for (uint16 Format = 0; Format <= 3; ++Format)
+    {
+        const FAdtData Data = FAdtParser::Parse(WowWaterRegression::MakeAdt(Format));
+        TestTrue(TEXT("Fixture contains all 256 terrain chunks"), Data.bIsValid);
+        if (!TestEqual(TEXT("Second layer remains readable after vertex arrays"), Data.WaterChunks[0].Layers.Num(), 2)) return false;
+        const FMH2OInstance& Layer = Data.WaterChunks[0].Layers[0];
+        TestEqual(TEXT("Offset rectangle stays local"), Layer.XOffset, uint8(2));
+        TestFalse(TEXT("Masked dry cell stays dry"), Layer.HasSubTile(0, 0));
+        TestTrue(TEXT("Offset wet cell survives"), Layer.HasSubTile(0, 1));
+        for (int32 I = 0; I < 6; ++I)
+        {
+            TestEqual(TEXT("Planar height array"), Layer.Heights[I], Format == 2 ? 20.0f : 21.0f + I);
+            TestEqual(TEXT("Depth follows entire height/UV arrays"), Layer.Depths[I], uint8(Format == 1 ? 255 : 10 + 10 * I));
+        }
+        TestEqual(TEXT("No-data layer retains its authored level"), Data.WaterChunks[0].Layers[1].Heights[3], 8.0f);
+        const FAdtData Truncated = FAdtParser::Parse(WowWaterRegression::MakeAdt(Format, true));
+        TestEqual(TEXT("Truncated liquid array cannot consume following MCNK bytes"), Truncated.WaterChunks[0].Layers.Num(), 1);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNorthshireAuthoredWater,
+    "WowUnreal.Water.NorthshireAssets", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FNorthshireAuthoredWater::RunTest(const FString& Parameters)
+{
+    FMpqManager& Mpq = WowTestUtils::GetMpq();
+    if (!TestTrue(TEXT("Local client archives available"), Mpq.IsInitialized())) return false;
+    TArray<uint8> Raw;
+    if (!TestTrue(TEXT("Northshire tile readable"), Mpq.ReadFile(TEXT("World\\Maps\\Azeroth\\Azeroth_32_48.adt"), Raw))) return false;
+    const FAdtData Data = FAdtParser::Parse(Raw);
+    if (!TestTrue(TEXT("Northshire parses"), Data.bIsValid)) return false;
+    int32 WetCells = 0;
+    int32 CheckedHeights = 0;
+    // Compare against the archive's float planes directly, independent of the
+    // parser's sanitization/mask selection and the former interleaved decoder.
+    auto U32 = [&](int32 Offset) { uint32 V = 0; FMemory::Memcpy(&V, Raw.GetData() + Offset, 4); return V; };
+    for (int32 P = 0; P + 8 <= Raw.Num(); P += 8 + U32(P + 4))
+    {
+        if (U32(P) != 0x4D48324F) continue;
+        const int32 Start = P + 8;
+        for (int32 Chunk = 0; Chunk < 256; ++Chunk)
+        {
+            const int32 InstanceOffset = U32(Start + Chunk * 12);
+            for (int32 L = 0; L < Data.WaterChunks[Chunk].Layers.Num(); ++L)
+            {
+                const FMH2OInstance& Layer = Data.WaterChunks[Chunk].Layers[L];
+                const int32 Vertices = U32(Start + InstanceOffset + L * 24 + 20);
+                for (int32 I = 0; Vertices && I < Layer.Heights.Num(); ++I)
+                {
+                    float Expected = 0; FMemory::Memcpy(&Expected, Raw.GetData() + Start + Vertices + I * 4, 4);
+                    TestEqual(TEXT("Every Northshire height matches the source"), Layer.Heights[I], Expected);
+                    ++CheckedHeights;
+                }
+                for (int32 Y = 0; Y < Layer.Height; ++Y)
+                    for (int32 X = 0; X < Layer.Width; ++X) WetCells += Layer.HasSubTile(Y, X) ? 1 : 0;
+            }
+        }
+        break;
+    }
+    TestEqual(TEXT("Whole authored river/pool mask survives"), WetCells, 1199);
+    TestEqual(TEXT("All authored Northshire water heights checked"), CheckedHeights, 2100);
+    int32 BasinRocks = 0;
+    for (const FAdtDoodadPlacement& Placement : Data.DoodadPlacements)
+        if (Data.DoodadPaths.IsValidIndex(Placement.NameIndex) &&
+            Data.DoodadPaths[Placement.NameIndex].Contains(TEXT("cliffrocks"), ESearchCase::IgnoreCase) &&
+            FVector2D::Distance(FVector2D(Placement.Position.X, Placement.Position.Z), FVector2D(17475.943359,25808.755859)) < 100.0)
+            ++BasinRocks;
+    TestTrue(TEXT("Original basin rocks remain placed"), BasinRocks >= 10);
+    UMaterialInterface* River = FWowWaterMaterial::GetWaterMaterial();
+    if (!TestNotNull(TEXT("UE Water custom-mesh material loads"), River)) return false;
+    const UMaterialInstanceDynamic* RiverInstance = Cast<UMaterialInstanceDynamic>(River);
+    TestTrue(TEXT("River uses the persistent derivative of the UE Water material"), RiverInstance && RiverInstance->Parent && RiverInstance->Parent->GetPathName() == TEXT("/Game/Water/MI_WowRiver.MI_WowRiver"));
+    FLinearColor Absorption;
+    TestTrue(TEXT("Native absorption parameter resolves"), River->GetVectorParameterValue(FMaterialParameterInfo(TEXT("Absorption")), Absorption));
+    // Native absorption is inverse distance (RGB*A). Verify clear shallow
+    // water with more green transmission, rather than merely exact constants.
+    TestTrue(TEXT("Two metres of river retain bottom visibility"), FMath::Exp(-200.0f / (Absorption.R * Absorption.A)) > 0.8f);
+    TestTrue(TEXT("Green transmission exceeds blue"), Absorption.G > Absorption.B);
+    TestTrue(TEXT("UE water shading model retained"), River->GetMaterial()->GetShadingModels().HasShadingModel(MSM_SingleLayerWater));
+    FWowAssetCache Cache;
+    const TCHAR* Falls[] = {
+        TEXT("World\\Azeroth\\Elwynn\\PassiveDoodads\\Waterfall\\ElwynnTallWaterfall01"),
+        TEXT("World\\Generic\\PassiveDoodads\\Waterfall\\NewWaterfall")};
+    for (const TCHAR* Path : Falls)
+    {
+        TArray<uint8> M2, Skin;
+        if (!Mpq.ReadFile(FString(Path) + TEXT(".m2"), M2) || !Mpq.ReadFile(FString(Path) + TEXT("00.skin"), Skin)) return false;
+        const FM2Data Model = FM2Parser::Parse(M2, Skin);
+        TestTrue(TEXT("Original waterfall mesh parses"), Model.bIsValid);
+        TestEqual(TEXT("Original contour retained"), Model.Vertices.Num(), 52);
+        if (!TestEqual(TEXT("Curtain and drops both retained"), Model.RenderPasses.Num(), 2)) return false;
+        UStaticMesh* Mesh = FWowDoodadManager::GetOrCreateStaticMesh(FString(Path) + TEXT(".m2"), &Mpq, &Cache);
+        if (!TestNotNull(TEXT("UE waterfall mesh builds"), Mesh)) return false;
+        if (!TestEqual(TEXT("Both UE effect layers reach the renderer"), Mesh->GetStaticMaterials().Num(), 2)) return false;
+        for (const FStaticMaterial& Slot : Mesh->GetStaticMaterials())
+        {
+            UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Slot.MaterialInterface);
+            if (!TestNotNull(TEXT("Waterfall effect instance created"), MID)) return false;
+            for (const TCHAR* Name : {TEXT("UEFoamTexture"), TEXT("UEWaterNormal")})
+            {
+                UTexture* Texture = nullptr;
+                TestTrue(TEXT("UE effect texture bound"), MID->GetTextureParameterValue(FMaterialParameterInfo(Name), Texture));
+                if (TestNotNull(TEXT("UE effect asset available"), Texture))
+                    TestTrue(TEXT("Water appearance only references UE Water content"), Texture->GetPathName().StartsWith(TEXT("/Water/")));
+            }
+            UTexture* ImportedWater = nullptr;
+            TestFalse(TEXT("No WoW BLP parameter in waterfall material"), MID->GetTextureParameterValue(FMaterialParameterInfo(TEXT("Layer0Texture")), ImportedWater));
+        }
+    }
+    AddInfo(FString::Printf(TEXT("Northshire: %d wet cells, %d exact heights, %d nearby cliff rocks; both waterfall spatial guides verified (appearance uses UE Water)"), WetCells, CheckedHeights, BasinRocks));
+    return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDoodadTiltCoordinates,
+    "WowUnreal.Water.DoodadTiltCoordinates", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FDoodadTiltCoordinates::RunTest(const FString& Parameters)
+{
+    // Independent column-vector transforms from the MDDF placement convention:
+    // source X/Z matrices are clockwise; Y is counterclockwise. Do not use
+    // the production quaternion construction to calculate this reference.
+    const FVector Rotations[] = {FVector(0,0,0), FVector(0,132,0), FVector(35,0,0),
+        FVector(0,0,47), FVector(-11.5,-42,-3), FVector(-70.5,-31.5,1.5),
+        FVector(-24,-83.5,-63), FVector(21,1,47)};
+    const FVector ModelPoints[] = {FVector(1,0,0), FVector(0,1,0), FVector(0,0,1), FVector(3,5,7)};
+    for (const FVector& Rotation : Rotations)
+        for (const FVector& Model : ModelPoints)
+        {
+            FVector P(Model.X, Model.Z, -Model.Y); // M2 -> ADT local axes
+            double A = FMath::DegreesToRadians(-Rotation.Z);
+            P = FVector(P.X, FMath::Cos(A)*P.Y + FMath::Sin(A)*P.Z, -FMath::Sin(A)*P.Y + FMath::Cos(A)*P.Z);
+            A = FMath::DegreesToRadians(Rotation.X);
+            P = FVector(FMath::Cos(A)*P.X + FMath::Sin(A)*P.Y, -FMath::Sin(A)*P.X + FMath::Cos(A)*P.Y, P.Z);
+            A = FMath::DegreesToRadians(Rotation.Y-90.0);
+            P = FVector(FMath::Cos(A)*P.X + FMath::Sin(A)*P.Z, P.Y, -FMath::Sin(A)*P.X + FMath::Cos(A)*P.Z);
+            const FVector Expected(-P.Z, P.X, P.Y);
+            const FVector Actual = FWowCoordinate::WowRotationToUEQuat(Rotation.X,Rotation.Y,Rotation.Z).RotateVector(FVector(Model.Y,Model.X,Model.Z));
+            TestTrue(*FString::Printf(TEXT("Tilt %s, vertex %s matches source placement"), *Rotation.ToString(), *Model.ToString()), Actual.Equals(Expected,0.0001));
+        }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FM2AuthoredEmotes335,
+    "WowUnreal.Animation.AuthoredEmotes335", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FM2AuthoredEmotes335::RunTest(const FString& Parameters)
+{
+    FMpqManager& Mpq = WowTestUtils::GetMpq();
+    if (!TestTrue(TEXT("Original MPQ required"), Mpq.IsInitialized())) return false;
+    const TSet<int32> Wanted = {66,67,68,69,97,100,115};
+    const TArray<FString> Races = {TEXT("Human"),TEXT("Dwarf"),TEXT("NightElf"),TEXT("Gnome"),TEXT("Draenei"),
+        TEXT("Orc"),TEXT("Scourge"),TEXT("Tauren"),TEXT("Troll"),TEXT("BloodElf")};
+    for (const FString& Race : Races) for (const FString& Gender : {FString(TEXT("Male")),FString(TEXT("Female"))})
+    {
+        const FString Path = FString::Printf(TEXT("Character\\%s\\%s\\%s%s"), *Race,*Gender,*Race,*Gender);
+        TArray<uint8> Raw,Skin;
+        if (!TestTrue(Path, Mpq.ReadFile(Path + TEXT(".m2"),Raw))) continue;
+        Mpq.ReadFile(Path + TEXT("00.skin"),Skin);
+        FM2Data Model = FM2Parser::Parse(Raw,Skin);
+        TestTrue(TEXT("Model valid"),Model.bIsValid);
+        if (Race == TEXT("Dwarf") && Gender == TEXT("Male"))
+            TestFalse(TEXT("Missing external sit must never read M2 bytes as keys"),Model.AnimationTracks.ContainsByPredicate(
+                [](const FM2AnimationData& C) { return C.AnimationId == 97; }));
+        FM2Parser::LoadAnimationTracks(Model,Raw,[&](uint16 Id,uint16 Variant,TArray<uint8>& Out)
+            { return Mpq.ReadFile(Path + FString::Printf(TEXT("%04u-%02u.anim"),Id,Variant),Out); },&Wanted);
+        for (int32 Id : Wanted)
+        {
+            const auto* Clip = Model.AnimationTracks.FindByPredicate([&](const FM2AnimationData& C) { return C.AnimationId == Id; });
+            if (!TestNotNull(FString::Printf(TEXT("%s original clip %d"),*Path,Id),Clip)) continue;
+            TestEqual(TEXT("One track per bone"),Clip->BoneTracks.Num(),Model.Bones.Num());
+            bool bSane = true;
+            for (const auto& B : Clip->BoneTracks)
+            {
+                for (const auto& V : B.TransValues) bSane &= !V.ContainsNaN() && V.GetAbsMax() < 20.0;
+                for (const auto& V : B.ScaleValues) bSane &= !V.ContainsNaN() && V.GetAbsMax() < 10.0;
+                for (const auto& V : B.RotValues) bSane &= !V.ContainsNaN() && FMath::Abs(V.SizeSquared()-1.0) < 0.02;
+            }
+            TestTrue(TEXT("Authored transforms stay finite and anatomically scaled"),bSane);
+        }
+        if (Race == TEXT("Dwarf") && Gender == TEXT("Male"))
+        {
+            // Compare a rotation against the actual external file, independent of parser addressing.
+            uint32 SeqCount,SeqOffset,BoneCount,BoneOffset;
+            FMemory::Memcpy(&SeqCount,Raw.GetData()+28,4); FMemory::Memcpy(&SeqOffset,Raw.GetData()+32,4);
+            FMemory::Memcpy(&BoneCount,Raw.GetData()+44,4); FMemory::Memcpy(&BoneOffset,Raw.GetData()+48,4);
+            uint32 Slot=0;
+            while (Slot < SeqCount && *reinterpret_cast<const uint16*>(Raw.GetData()+SeqOffset+Slot*64)!=97) ++Slot;
+            TArray<uint8> Anim; Mpq.ReadFile(Path + TEXT("0097-00.anim"),Anim);
+            const auto* Clip=Model.AnimationTracks.FindByPredicate([](const FM2AnimationData& C) { return C.AnimationId==97; });
+            bool bCompared=false;
+            for(uint32 B=0; Clip && B<BoneCount && !bCompared; ++B)
+            {
+                const uint8* Block=Raw.GetData()+BoneOffset+B*88+36;
+                const uint32 Arrays=*reinterpret_cast<const uint32*>(Block+12), Offset=*reinterpret_cast<const uint32*>(Block+16);
+                if(Slot>=Arrays) continue;
+                const uint32 Count=*reinterpret_cast<const uint32*>(Raw.GetData()+Offset+Slot*8);
+                const uint32 Keys=*reinterpret_cast<const uint32*>(Raw.GetData()+Offset+Slot*8+4);
+                if(!Count || Keys+8>uint32(Anim.Num()) || Clip->BoneTracks[B].RotValues.IsEmpty()) continue;
+                const int16* Q=reinterpret_cast<const int16*>(Anim.GetData()+Keys);
+                auto Decode=[](int16 V) { return (V<0?V+32768:V-32767)/32767.0; };
+                TestTrue(TEXT("Sit rotation comes from 0097-00.anim"),Clip->BoneTracks[B].RotValues[0].Equals(FQuat(Decode(Q[0]),Decode(Q[1]),Decode(Q[2]),Decode(Q[3])),1.e-7));
+                bCompared=true;
+            }
+            TestTrue(TEXT("Compared external sit key"),bCompared);
+        }
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FEmoteDbcRouting335,
+    "WowUnreal.Animation.EmoteDbcRouting335", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FEmoteDbcRouting335::RunTest(const FString& Parameters)
+{
+    FMpqManager& Mpq = WowTestUtils::GetMpq();
+    TArray<uint8> Bytes; FDbcParser Parser; FEmotesTextDbc Text; FEmotesDbc Emotes;
+    if (!Mpq.ReadFile(TEXT("DBFilesClient\\EmotesText.dbc"),Bytes) || !Parser.Parse(Bytes) || !Text.Load(Parser)) return false;
+    if (!Mpq.ReadFile(TEXT("DBFilesClient\\Emotes.dbc"),Bytes) || !Parser.Parse(Bytes) || !Emotes.Load(Parser)) return false;
+    const auto* Dance=Text.GetByCommand(TEXT("dance"));
+    if (!TestNotNull(TEXT("Dance command"),Dance)) return false;
+    TestEqual(TEXT("Dance sends text emote 34, not animation/emote 10"),Dance->ID,34u);
+    const auto* State=Emotes.GetById(Dance->EmoteID);
+    if (!TestNotNull(TEXT("Dance state"),State)) return false;
+    TestEqual(TEXT("Original dance clip"),State->AnimationID,69u);
+    TestTrue(TEXT("Dance loops"),State->IsLooping());
+    for (const FString& Command : {FString(TEXT("wave")),FString(TEXT("bow")),FString(TEXT("cheer"))})
+    {
+        const auto* Entry=Text.GetByCommand(Command);
+        if (!TestNotNull(Command,Entry)) continue;
+        const auto* Emote=Emotes.GetById(Entry->EmoteID);
+        if (TestNotNull(TEXT("Original one-shot mapping"),Emote)) TestFalse(TEXT("One-shot does not loop"),Emote->IsLooping());
+    }
+    TestNull(TEXT("Unknown command has no invented animation"),Text.GetByCommand(TEXT("not-an-emote")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRiverSurfaceFacing,
+    "WowUnreal.Water.SurfaceFacing", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FRiverSurfaceFacing::RunTest(const FString& Parameters)
+{
+    // Test the triangles actually emitted for a sloping MH2O cell after coordinate
+    // conversion. The former winding made the native shader show its underside.
+    const FVector P[] = {
+        FWowCoordinate::AdtToUE(17400, 70, 25800),
+        FWowCoordinate::AdtToUE(17406, 70, 25800),
+        FWowCoordinate::AdtToUE(17400, 69, 25806),
+        FWowCoordinate::AdtToUE(17406, 69, 25806)};
+    TArray<int32> Indices;
+    FWowWaterRenderer::AppendSurfaceCellIndices(Indices, 0, 1, 2, 3);
+    if (!TestEqual(TEXT("Wet cell retains two triangles"), Indices.Num(), 6)) return false;
+    for (int I=0; I<6; I+=3)
+    {
+        const FVector Cross = FVector::CrossProduct(P[Indices[I+1]]-P[Indices[I]], P[Indices[I+2]]-P[Indices[I]]);
+        TestTrue(TEXT("River presents the UE front face to a camera above it"), Cross.Z < 0);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRiverSurfaceImpulses,
+    "WowUnreal.Water.SurfaceImpulses", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FRiverSurfaceImpulses::RunTest(const FString& Parameters)
+{
+    auto* Material = FWowWaterMaterial::GetWaterMaterial();
+    FWowWaterMaterial::UpdateSurfaceRipples(-1);
+    FWowWaterMaterial::UpdateSurfaceRipples(10);
+    // Nine impacts must replace the oldest of the eight slots, not allocate more.
+    for (int32 I=0; I<9; ++I)
+        FWowWaterMaterial::AddSurfaceRipple(FVector(100+I,200,7000), FVector(3,4,0), false, 10+I*.1f);
+    FLinearColor Position, Direction;
+    TestTrue(TEXT("Shader exposes surface impulses"), Material->GetVectorParameterValue(FMaterialParameterInfo(TEXT("RipplePosition0")), Position));
+    TestEqual(TEXT("Ninth impulse reuses the oldest slot"), Position.R, 108.f);
+    Material->GetVectorParameterValue(FMaterialParameterInfo(TEXT("RippleDirection0")), Direction);
+    TestTrue(TEXT("Wake uses normalized travel direction"), FMath::IsNearlyEqual(Direction.R,.6f) && FMath::IsNearlyEqual(Direction.G,.8f));
+    FWowWaterMaterial::UpdateSurfaceRipples(0);
+    for (int32 I=0; I<8; ++I)
+    {
+        Material->GetVectorParameterValue(FMaterialParameterInfo(*FString::Printf(TEXT("RipplePosition%d"),I)), Position);
+        TestTrue(TEXT("New world clears old surface impacts"), Position.A < -10);
+    }
     return true;
 }

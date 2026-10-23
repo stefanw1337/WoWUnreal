@@ -25,7 +25,7 @@ bool FTaxiNodesDbc::Load(const FDbcParser& Parser)
         Entry.X = Parser.GetFloat(i, 2);
         Entry.Y = Parser.GetFloat(i, 3);
         Entry.Z = Parser.GetFloat(i, 4);
-        Entry.Name = Parser.GetString(i, 5);
+        Entry.Name = Parser.GetLocalizedString(i, 5);
 
         IdIndex.Add(Entry.ID, Entries.Num());
         Entries.Add(Entry);

@@ -24,7 +24,7 @@ FBlpTexture FBlpParser::Parse(const TArray<uint8>& Data)
     if (Data.Num() < (int32)sizeof(FBlpHeader)) return Result;
     const FBlpHeader* H = reinterpret_cast<const FBlpHeader*>(Data.GetData());
     if (H->Magic != 0x32504C42) { UE_LOG(LogBlp, Warning, TEXT("Invalid BLP magic: 0x%08X"), H->Magic); return Result; }
-    if (H->Width == 0 || H->Height == 0) return Result;
+    if (H->Width == 0 || H->Height == 0 || H->Width > 16384 || H->Height > 16384) return Result;
 
     if (H->Encoding == 2)
         Result = ParseDXT(Data.GetData(), Data.Num(), H->Width, H->Height, H->AlphaDepth, H->AlphaEncoding, H->MipOffsets, H->MipSizes);
@@ -50,7 +50,7 @@ FBlpTexture FBlpParser::ParseDXT(const uint8* Data, uint32 DataSize, uint32 Widt
     for (int32 i = 0; i < 16; i++)
     {
         if (MipOffsets[i] == 0 || MipSizes[i] == 0) break;
-        if (MipOffsets[i] + MipSizes[i] > DataSize) break;
+        if (static_cast<uint64>(MipOffsets[i]) + MipSizes[i] > DataSize) break;
         FBlpMipLevel& Mip = Result.MipLevels.AddDefaulted_GetRef();
         Mip.Width = FMath::Max(W, 1u); Mip.Height = FMath::Max(H, 1u);
         Mip.Data.SetNumUninitialized(MipSizes[i]);
@@ -71,26 +71,50 @@ FBlpTexture FBlpParser::ParsePaletted(const uint8* Data, uint32 DataSize, uint32
     for (int32 i = 0; i < 16; i++)
     {
         if (MipOffsets[i] == 0 || MipSizes[i] == 0) break;
-        if (MipOffsets[i] + MipSizes[i] > DataSize) break;
-        uint32 Pixels = FMath::Max(W,1u) * FMath::Max(H,1u);
+        if (static_cast<uint64>(MipOffsets[i]) + MipSizes[i] > DataSize) break;
+        const uint64 PixelCount = static_cast<uint64>(FMath::Max(W,1u)) * FMath::Max(H,1u);
+        if (PixelCount > MAX_int32 / 4) break;
+        const uint32 Pixels = static_cast<uint32>(PixelCount);
         FBlpMipLevel& Mip = Result.MipLevels.AddDefaulted_GetRef();
         Mip.Width = FMath::Max(W,1u); Mip.Height = FMath::Max(H,1u);
         Mip.Data.SetNumUninitialized(Pixels * 4);
         const uint8* Idx = Data + MipOffsets[i];
-        for (uint32 p = 0; p < Pixels && p < MipSizes[i]; p++)
+        const uint32 IndexBytes = FMath::Min(Pixels, MipSizes[i]);
+        const uint32 AlphaOffset = Pixels;
+        const uint32 AlphaBytesAvailable = (MipSizes[i] > AlphaOffset) ? (MipSizes[i] - AlphaOffset) : 0;
+
+        for (uint32 p = 0; p < Pixels && p < IndexBytes; p++)
         {
             const uint8* C = Pal + Idx[p] * 4;
             Mip.Data[p*4+0] = C[2]; // R (palette is BGRA, output RGBA)
             Mip.Data[p*4+1] = C[1]; // G
             Mip.Data[p*4+2] = C[0]; // B
-            if (AlphaDepth == 8 && MipOffsets[i]+Pixels+p < DataSize)
-                Mip.Data[p*4+3] = Idx[Pixels+p];
-            else if (AlphaDepth == 4 && MipOffsets[i]+Pixels+p/2 < DataSize)
+            if (AlphaDepth == 8 && p < AlphaBytesAvailable)
             {
-                uint8 a = Idx[Pixels+p/2];
+                Mip.Data[p*4+3] = Idx[AlphaOffset + p];
+            }
+            else if (AlphaDepth == 4 && (p / 2) < AlphaBytesAvailable)
+            {
+                uint8 a = Idx[AlphaOffset + p / 2];
                 Mip.Data[p*4+3] = (p%2==0) ? ((a&0x0F)*17) : ((a>>4)*17);
             }
-            else Mip.Data[p*4+3] = 255;
+            else if (AlphaDepth == 1 && (p / 8) < AlphaBytesAvailable)
+            {
+                const uint8 a = Idx[AlphaOffset + p / 8];
+                Mip.Data[p*4+3] = (a & (1u << (p % 8))) ? 255 : 0;
+            }
+            else
+            {
+                Mip.Data[p*4+3] = 255;
+            }
+        }
+
+        for (uint32 p = IndexBytes; p < Pixels; p++)
+        {
+            Mip.Data[p*4+0] = 255;
+            Mip.Data[p*4+1] = 255;
+            Mip.Data[p*4+2] = 255;
+            Mip.Data[p*4+3] = 0;
         }
         W >>= 1; H >>= 1;
     }

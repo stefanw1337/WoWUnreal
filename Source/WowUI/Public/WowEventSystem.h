@@ -25,6 +25,13 @@ public:
 	/** Unregister a frame from all events */
 	void UnregisterAllEvents(int64 FrameHandle);
 
+	/** frame:IsEventRegistered(event) */
+	bool IsEventRegistered(int64 FrameHandle, const FString& EventName) const
+	{
+		const TSet<int64>* Handles = EventRegistrations.Find(EventName);
+		return Handles && Handles->Contains(FrameHandle);
+	}
+
 	/** Fire an event to all registered frames, calling their OnEvent Lua handlers */
 	void FireEvent(const FString& EventName, const TArray<FString>& Args = {});
 
@@ -36,6 +43,10 @@ public:
 
 	/** Create or update a Lua table representing a frame (sets it as a named global if the frame has a name) */
 	void CreateFrameObject(int64 Handle, const FString& FrameName, int32 FrameID = 0);
+	/** Push the canonical Lua table for a frame (the one scripts receive as self). False if none. */
+	bool PushFrameObject(int64 Handle) const;
+	/** r267: push a frame's current script handler (XML or SetScript), for HookScript/GetScript. False if none. */
+	bool PushFrameScript(int64 Handle, const FString& ScriptName) const;
 
 	/** Create a Lua global table for a named texture/fontstring region */
 	void CreateTextureRegionGlobal(const FString& RegionName, int64 ParentHandle = -1, const FString& ObjectType = TEXT("Texture"));
@@ -64,8 +75,14 @@ public:
 	/** Run a click-style handler with a string button arg and a real Lua boolean for `down`. */
 	bool RunFrameClickScript(int64 Handle, const FString& ScriptName, const FString& Button, bool bMouseDown);
 
+	/** Execute a small native UI bridge chunk in the sandboxed FrameXML Lua VM. */
+	bool ExecuteLuaString(const FString& Code, const FString& ChunkName = TEXT("=NativeUIBridge"));
+
 	/** Read a frame's Lua attribute (__attr_<name>) as a string. Returns empty if not set. */
 	FString GetFrameAttribute(int64 Handle, const FString& AttrName) const;
+
+	/** Value of a Lua global string (GlobalStrings.lua), empty if it is not a string. */
+	FString GetGlobalString(const FString& Name) const;
 
 	/** Read a frame's __id field as an integer. Returns 0 if not set. */
 	int32 GetFrameID(int64 Handle) const;

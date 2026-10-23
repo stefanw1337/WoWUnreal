@@ -6,6 +6,7 @@
 
 class AWowWorldManager;
 class AWowLoginController;
+class AWowPlayerCharacter;
 class UWowConnectionManager;
 
 UCLASS()
@@ -30,6 +31,13 @@ private:
     void SetupUITestScene(UWorld* World);
     void SetupLoginScene(UWorld* World);
     void SetupNetworkTestScene(UWorld* World);
+
+    /** Local-only connection container used to provide player state to FrameXML. */
+    UPROPERTY() TObjectPtr<UWowConnectionManager> OfflineConnectionManager;
+    UPROPERTY() TObjectPtr<AWowPlayerCharacter> OfflinePlayerPawn;
+    FTimerHandle OfflineGroundTimerHandle;
+    void TryFinalizeOfflineSpawn();
+    void StartOfflineLocomotionVerification();
 
     /** Network test scene state */
     UPROPERTY() TObjectPtr<UWowConnectionManager> NetworkTestConnMgr;

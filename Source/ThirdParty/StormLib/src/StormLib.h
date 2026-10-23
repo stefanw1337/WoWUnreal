@@ -75,6 +75,7 @@
 /* 10.11.17  9.22  Lad  Release 9.22                                         */
 /* 28.09.22  9.24  Lad  lcLocale -> lcFileLocale, also contains platform     */
 /* 01.11.24  9.30  Lad  Added conversion from UTF-8 to file name and back    */
+/* 04.07.26  9.30  Lad  Added SFileOpenFileArchive                           */
 /*****************************************************************************/
 
 #ifndef __STORMLIB_H__
@@ -144,8 +145,8 @@ extern "C" {
 //-----------------------------------------------------------------------------
 // Defines
 
-#define STORMLIB_VERSION                0x091F  // Current version of StormLib
-#define STORMLIB_VERSION_STRING         "9.31"  // Current version of StormLib as string
+#define STORMLIB_VERSION                0x0928  // Current numeric version of StormLib
+#define STORMLIB_VERSION_STRING         "9.40"  // Current string version of StormLib
 
 #define ID_MPQ                      0x1A51504D  // MPQ archive header ID ('MPQ\x1A')
 #define ID_MPQ_USERDATA             0x1B51504D  // MPQ userdata entry ('MPQ\x1B')
@@ -317,10 +318,11 @@ extern "C" {
 
 #define MPQ_ATTRIBUTES_V1                  100  // (attributes) format version 1.00
 
-// Flags for SFileOpenArchive
+// Flags for FileStream
 #define BASE_PROVIDER_FILE          0x00000000  // Base data source is a file
 #define BASE_PROVIDER_MAP           0x00000001  // Base data source is memory-mapped file
-#define BASE_PROVIDER_HTTP          0x00000002  // Base data source is a file on web server
+#define BASE_PROVIDER_MPQ           0x00000002  // Base data source is a file within MPQ
+#define BASE_PROVIDER_HTTP          0x00000003  // Base data source is a file on web server
 #define BASE_PROVIDER_MASK          0x0000000F  // Mask for base provider value
 
 #define STREAM_PROVIDER_FLAT        0x00000000  // Stream is linear with no offset mapping
@@ -835,6 +837,7 @@ typedef struct _TMPQArchive
     ULONGLONG      FileSize;                    // Size of the file at the moment of file open
     ULONGLONG      FileOffsetMask;              // 0xFFFFFFFF for MPQ v 1, otherwise 0xFFFFFFFFFFFFFFFFull
 
+    struct _TMPQArchive * haParent;             // Pointer to parent archive, if any
     struct _TMPQArchive * haPatch;              // Pointer to patch archive, if any
     struct _TMPQArchive * haBase;               // Pointer to base ("previous version") archive, if any
     TMPQNamePrefix * pPatchPrefix;              // Patch prefix to precede names of patch files
@@ -861,6 +864,7 @@ typedef struct _TMPQArchive
     DWORD          dwAttrFlags;                 // Flags for the (attributes) file, see MPQ_ATTRIBUTE_XXX
     DWORD          dwValidFileFlags;            // Valid flags for the current MPQ
     DWORD          dwRealHashTableSize;         // Real size of the hash table, if MPQ_FLAG_HASH_TABLE_CUT is set in dwFlags
+    DWORD          dwPriority;                  // MPQ priority (unused so far)
     DWORD          dwFlags;                     // See MPQ_FLAG_XXXXX
     DWORD          dwSubType;                   // See MPQ_SUBTYPE_XXX
 
@@ -978,8 +982,9 @@ struct TStreamBitmap
 };
 
 // UNICODE versions of the file access functions
-TFileStream * FileStream_CreateFile(const TCHAR * szFileName, DWORD dwStreamFlags);
-TFileStream * FileStream_OpenFile(const TCHAR * szFileName, DWORD dwStreamFlags);
+TFileStream * FileStream_CreateFile(LPCTSTR szFileName, DWORD dwStreamFlags);
+TFileStream * FileStream_OpenFile(LPCTSTR szFileName, DWORD dwStreamFlags);
+TFileStream * FileStream_OpenFileArchive(HANDLE hParentMpq, LPCSTR szFileName);
 const TCHAR * FileStream_GetFileName(TFileStream * pStream);
 size_t FileStream_Prefix(const TCHAR * szFileName, DWORD * pdwProvider);
 
@@ -1005,6 +1010,7 @@ typedef bool  (WINAPI * SFILEOPENARCHIVE)(const char *, DWORD, DWORD, HANDLE *);
 typedef bool  (WINAPI * SFILECLOSEARCHIVE)(HANDLE);
 typedef bool  (WINAPI * SFILEOPENFILEEX)(HANDLE, const char *, DWORD, HANDLE *);
 typedef bool  (WINAPI * SFILECLOSEFILE)(HANDLE);
+typedef bool  (WINAPI * SFILEGETFILEARCHIVE)(HANDLE, HANDLE *);
 typedef DWORD (WINAPI * SFILEGETFILESIZE)(HANDLE, LPDWORD);
 typedef DWORD (WINAPI * SFILESETFILEPOINTER)(HANDLE, LONG, LONG *, DWORD);
 typedef bool  (WINAPI * SFILEREADFILE)(HANDLE, void *, DWORD, LPDWORD, LPOVERLAPPED);
@@ -1028,7 +1034,9 @@ LCID   WINAPI SFileSetLocale(LCID lcFileLocale);
 //-----------------------------------------------------------------------------
 // Functions for archive manipulation
 
-bool   WINAPI SFileOpenArchive(const TCHAR * szMpqName, DWORD dwPriority, DWORD dwFlags, HANDLE * phMpq);
+bool   WINAPI SFileOpenArchive(LPCTSTR szMpqName, DWORD dwPriority, DWORD dwFlags, HANDLE * phMpq);
+bool   WINAPI SFileOpenFileArchive(HANDLE hParentMpq, LPCSTR szFileName, DWORD dwPriority, DWORD dwFlags, HANDLE * phMpq);
+
 bool   WINAPI SFileCreateArchive(const TCHAR * szMpqName, DWORD dwCreateFlags, DWORD dwMaxFileCount, HANDLE * phMpq);
 bool   WINAPI SFileCreateArchive2(const TCHAR * szMpqName, PSFILE_CREATE_MPQ pCreateInfo, HANDLE * phMpq);
 
@@ -1067,6 +1075,7 @@ bool   WINAPI SFileIsPatchedArchive(HANDLE hMpq);
 // Reading from MPQ file
 bool   WINAPI SFileHasFile(HANDLE hMpq, const char * szFileName);
 bool   WINAPI SFileOpenFileEx(HANDLE hMpq, const char * szFileName, DWORD dwSearchScope, HANDLE * phFile);
+bool   WINAPI SFileGetFileArchive(HANDLE hFile, HANDLE * phMpq);
 DWORD  WINAPI SFileGetFileSize(HANDLE hFile, LPDWORD pdwFileSizeHigh);
 DWORD  WINAPI SFileSetFilePointer(HANDLE hFile, LONG lFilePos, LONG * plFilePosHigh, DWORD dwMoveMethod);
 bool   WINAPI SFileReadFile(HANDLE hFile, void * lpBuffer, DWORD dwToRead, LPDWORD pdwRead, LPOVERLAPPED lpOverlapped);

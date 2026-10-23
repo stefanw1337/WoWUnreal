@@ -123,9 +123,9 @@ void UWowTooltipManager::ShowTooltipForEntity(const FWowEntity* Entity, const FV
         if (TSharedPtr<SOverlay> RootOverlay = StaticCastSharedPtr<SOverlay>(Root))
         {
             RootOverlay->AddSlot()
-            .HAlign(HAlign_Left)
-            .VAlign(VAlign_Top)
-            .Padding(FMargin(Position.X + 10, Position.Y + 10, 0, 0)) // Offset from mouse
+            .HAlign(HAlign_Right)
+            .VAlign(VAlign_Bottom)
+            .Padding(FMargin(0.0f, 0.0f, 18.0f, 102.0f))
             [
                 TooltipWidget.ToSharedRef()
             ];

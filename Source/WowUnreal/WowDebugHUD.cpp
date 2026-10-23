@@ -4,11 +4,16 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 void AWowDebugHUD::DrawHUD()
 {
     Super::DrawHUD();
 
+    // Keep diagnostics available without drawing them over the real FrameXML
+    // HUD during normal offline or online gameplay.
+    if (!FParse::Param(FCommandLine::Get(), TEXT("debughud"))) return;
     if (!Canvas) return;
 
     float Y = Margin;

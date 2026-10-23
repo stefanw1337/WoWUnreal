@@ -14,11 +14,15 @@ class FWowAssetCache;
  */
 struct WOWASSETS_API FGeosetSectionInfo
 {
+    int32 RenderPassIndex = INDEX_NONE;
+    FVector2D UVScrollSpeed = FVector2D::ZeroVector;
 	int32 SectionIndex = 0;   // Mesh section index (polygon group)
 	uint16 GeosetId = 0;     // Raw geoset ID from M2 submesh (e.g. 0, 1, 101, 201, 401, 801)
 	uint16 GeosetGroup = 0;  // GeosetId / 100 (0=body, 1=hair, 2=facial, 4=gloves, 8=tabard, etc.)
 	uint16 GeosetVariant = 0; // GeosetId % 100 (0=default, 1+=specific customization/equipment)
 	uint16 TextureIndex = 0; // Index into M2Data.TexturePaths for this section's render pass
+	uint16 BlendMode = 0;    // M2 render-flag blend mode for this section
+	uint16 RenderFlags = 0;  // M2 render flags (two-sided/unlit/etc.)
 };
 
 /**
@@ -47,7 +51,8 @@ public:
 
 	/** Build UAnimSequence assets for all parsed animation tracks. */
 	static TArray<UAnimSequence*> CreateAnimations(const FM2Data& Data, USkeleton* Skeleton,
-		const FString& ModelName);
+		const FString& ModelName, const TSet<int32>* AnimationIds = nullptr,
+		TArray<int32>* OutAnimationIds = nullptr, bool bFirstVariantOnly = false);
 
 	/** Get a bone name for a given bone index (deterministic naming). */
 	static FName GetBoneName(int32 BoneIndex);

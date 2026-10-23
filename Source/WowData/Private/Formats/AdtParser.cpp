@@ -191,7 +191,7 @@ namespace
                    bool bBigAlpha, bool bDoNotFixAlpha, FAdtChunkData& Chunk)
     {
         // The start of the MCAL data block (after its 8-byte chunk header)
-        const int32 McalDataStart = R.Pos;
+        const uint32 McalDataStart = static_cast<uint32>(R.Pos);
 
         for (int32 LayerIdx = 0; LayerIdx < Layers.Num(); ++LayerIdx)
         {
@@ -202,7 +202,7 @@ namespace
             const FMclyEntry& Layer = Layers[LayerIdx];
 
             // Seek to the layer's alpha data (offset relative to MCAL data start)
-            if (McalDataStart + Layer.OfsAlpha >= R.Size) continue;
+            if (static_cast<uint64>(McalDataStart) + Layer.OfsAlpha >= R.Size) continue;
             R.Seek(McalDataStart + Layer.OfsAlpha);
 
             TArray<uint8> AlphaMap;
@@ -323,10 +323,24 @@ namespace
         uint16 HolesLow     = R.ReadU16();
         uint16 Unknown      = R.ReadU16(); // unknown_but_used
 
-        // low_quality_texture_map: 16 bytes
-        R.Skip(16);
-        // no_effect_doodad: 8 bytes
-        R.Skip(8);
+        // The client uses these compact 8x8 maps to select which of the four
+        // texture layers supplies ground clutter and where clutter is disabled.
+        for (int32 Row = 0; Row < 8; ++Row)
+        {
+            uint16 LayerRow = R.ReadU16();
+            for (int32 Col = 0; Col < 8; ++Col)
+            {
+                Chunk.GroundEffectLayerMap[Row * 8 + Col] = static_cast<uint8>((LayerRow >> (Col * 2)) & 0x3u);
+            }
+        }
+        for (int32 Row = 0; Row < 8; ++Row)
+        {
+            const uint8 DisabledRow = R.ReadU8();
+            for (int32 Col = 0; Col < 8; ++Col)
+            {
+                Chunk.GroundEffectDisabled[Row * 8 + Col] = (DisabledRow & (1u << Col)) != 0;
+            }
+        }
 
         uint32 OfsSndEmitters = R.ReadU32();
         uint32 NSndEmitters   = R.ReadU32();
@@ -357,7 +371,7 @@ namespace
         const bool bDoNotFixAlpha = (Flags & MCNK_FLAG_DO_NOT_FIX_ALPHA) != 0;
 
         // ── MCVT (heights) ──────────────────────────────────────────────────
-        if (OfsHeight > 0 && McnkDataStart + OfsHeight + 8 + 145*4 <= R.Size)
+        if (OfsHeight > 0 && McnkDataStart + OfsHeight + 8 + 145 * 4 <= static_cast<int64>(R.Size))
         {
             R.Seek(McnkDataStart + OfsHeight);
             uint32 SubMagic, SubSize;
@@ -374,7 +388,7 @@ namespace
         }
 
         // ── MCNR (normals) ─────────────────────────────────────────────────
-        if (OfsNormal > 0 && McnkDataStart + OfsNormal + 8 < R.Size)
+        if (OfsNormal > 0 && McnkDataStart + OfsNormal + 8 < static_cast<int64>(R.Size))
         {
             R.Seek(McnkDataStart + OfsNormal);
             uint32 SubMagic, SubSize;
@@ -384,7 +398,7 @@ namespace
 
         // ── MCLY (texture layers) ──────────────────────────────────────────
         TArray<FMclyEntry> Layers;
-        if (OfsLayer > 0 && McnkDataStart + OfsLayer + 8 < R.Size)
+        if (OfsLayer > 0 && McnkDataStart + OfsLayer + 8 < static_cast<int64>(R.Size))
         {
             R.Seek(McnkDataStart + OfsLayer);
             uint32 SubMagic, SubSize;
@@ -392,14 +406,16 @@ namespace
             Layers = ParseMCLY(R, SubSize);
 
             Chunk.TextureIndices.Reserve(Layers.Num());
+            Chunk.GroundEffectIds.Reserve(Layers.Num());
             for (const FMclyEntry& L : Layers)
             {
                 Chunk.TextureIndices.Add(static_cast<int32>(L.TextureId));
+                Chunk.GroundEffectIds.Add(L.EffectId);
             }
         }
 
         // ── MCAL (alpha maps) ──────────────────────────────────────────────
-        if (OfsAlpha > 0 && Layers.Num() > 1 && McnkDataStart + OfsAlpha + 8 < R.Size)
+        if (OfsAlpha > 0 && Layers.Num() > 1 && McnkDataStart + OfsAlpha + 8 < static_cast<int64>(R.Size))
         {
             R.Seek(McnkDataStart + OfsAlpha);
             uint32 SubMagic, SubSize;
@@ -408,7 +424,7 @@ namespace
         }
 
         // ── MCCV (vertex colors, optional) ─────────────────────────────────
-        if ((Flags & MCNK_FLAG_HAS_MCCV) && OfsMCCV > 0 && McnkDataStart + OfsMCCV + 8 < R.Size)
+        if ((Flags & MCNK_FLAG_HAS_MCCV) && OfsMCCV > 0 && McnkDataStart + OfsMCCV + 8 < static_cast<int64>(R.Size))
         {
             R.Seek(McnkDataStart + OfsMCCV);
             uint32 SubMagic, SubSize;
@@ -656,30 +672,31 @@ FAdtData FAdtParser::Parse(const TArray<uint8>& Data, bool bBigAlpha)
     {
         R.Seek(AbsOfs(OfsMh2o));
         uint32 Magic, Size;
-        if (ReadChunkHeader(R, Magic, Size) && Magic == MAGIC_MH2O)
+        if (ReadChunkHeader(R, Magic, Size) && Magic == MAGIC_MH2O && Size >= 256 * 12 && static_cast<int64>(R.Pos) + Size <= R.Size)
         {
             int32 Mh2oStart = R.Pos; // start of MH2O data (offsets are relative to this)
 
             // 256 chunk headers (12 bytes each)
-            struct FMH2OHeader { uint32 OfsInstances; uint32 LayerCount; uint32 OfsRenderMask; };
+            struct FMH2OHeader { uint32 OfsInstances; uint32 LayerCount; uint32 OfsAttributes; };
             FMH2OHeader Headers[256];
             for (int32 i = 0; i < 256; i++)
             {
                 Headers[i].OfsInstances  = R.ReadU32();
                 Headers[i].LayerCount    = R.ReadU32();
-                Headers[i].OfsRenderMask = R.ReadU32();
+                Headers[i].OfsAttributes = R.ReadU32();
             }
 
             int32 WaterChunkCount = 0;
             for (int32 i = 0; i < 256; i++)
             {
-                if (Headers[i].LayerCount == 0 || Headers[i].OfsInstances == 0) continue;
+                if (Headers[i].LayerCount == 0 || Headers[i].OfsInstances == 0 ||
+                    Headers[i].OfsInstances > Size || Size - Headers[i].OfsInstances < 24) continue;
 
                 R.Seek(Mh2oStart + Headers[i].OfsInstances);
 
                 for (uint32 Layer = 0; Layer < Headers[i].LayerCount; Layer++)
                 {
-                    if (!R.CanRead(24)) break;
+                    if (R.Pos < Mh2oStart || static_cast<int64>(R.Pos) + 24 > static_cast<int64>(Mh2oStart) + Size) break;
 
                     FMH2OInstance Inst;
                     Inst.LiquidType    = R.ReadU16();
@@ -695,48 +712,93 @@ FAdtData FAdtParser::Parse(const TArray<uint8>& Data, bool bBigAlpha)
 
                     int32 NextLayerPos = R.Pos; // save position for next layer
 
-                    // Read existence bitmap (8 bytes)
+                    const bool bValidLayerRect =
+                        Inst.Width > 0 && Inst.Height > 0 &&
+                        Inst.XOffset < 8 && Inst.YOffset < 8 &&
+                        Inst.Width <= 8 && Inst.Height <= 8 &&
+                        Inst.XOffset + Inst.Width <= 8 &&
+                        Inst.YOffset + Inst.Height <= 8;
+                    const bool bValidHeightRange =
+                        FMath::IsFinite(Inst.MinHeight) &&
+                        FMath::IsFinite(Inst.MaxHeight) &&
+                        Inst.MinHeight > -2000.0f &&
+                        Inst.MaxHeight < 2000.0f &&
+                        Inst.MaxHeight >= Inst.MinHeight - 0.1f;
+
+                    if (!bValidLayerRect || !bValidHeightRange)
+                    {
+                        R.Seek(NextLayerPos);
+                        continue;
+                    }
+
+                    // Read the liquid existence bitmap. In WotLK MH2O this mask
+                    // is local to the layer rectangle, not to the whole 8x8
+                    // chunk. Reading/treating it as a full chunk mask shifts
+                    // offset layers and creates broken, patchy rivers.
                     if (OfsMask != 0)
                     {
+                        Inst.bHasExplicitExistsBitmap = true;
+                        const uint32 RequiredMaskBytes = (Inst.Width * Inst.Height + 7) / 8;
+                        if (OfsMask > Size || RequiredMaskBytes > Size - OfsMask)
+                        {
+                            R.Seek(NextLayerPos);
+                            continue;
+                        }
                         R.Seek(Mh2oStart + OfsMask);
                         Inst.ExistsBitmap = 0;
-                        for (int32 Row = 0; Row < Inst.Height; Row++)
+                        const int32 LocalMaskBytes = FMath::Clamp((Inst.Width * Inst.Height + 7) / 8, 0, 8);
+                        const int32 MaskBytes = LocalMaskBytes;
+                        Inst.bExistsBitmapIsFullChunk = false;
+                        for (int32 ByteIndex = 0; ByteIndex < MaskBytes && R.CanRead(1); ByteIndex++)
                         {
-                            uint8 RowBits = R.ReadU8();
-                            Inst.ExistsBitmap |= ((uint64)RowBits) << (Row * 8);
+                            Inst.ExistsBitmap |= static_cast<uint64>(R.ReadU8()) << (ByteIndex * 8);
                         }
                     }
                     else
                     {
-                        // No mask = all sub-tiles exist
-                        Inst.ExistsBitmap = 0xFFFFFFFFFFFFFFFFULL;
+                        // No mask = every sub-tile in the layer rectangle exists.
+                        Inst.bHasExplicitExistsBitmap = false;
+                        Inst.bExistsBitmapIsFullChunk = false;
+                        Inst.ExistsBitmap = 0;
+                        for (int32 Row = 0; Row < Inst.Height; ++Row)
+                        {
+                            for (int32 Col = 0; Col < Inst.Width; ++Col)
+                            {
+                                Inst.ExistsBitmap |= 1ULL << (Row * Inst.Width + Col);
+                            }
+                        }
                     }
 
-                    // Read height map: (Width+1) * (Height+1) floats
-                    int32 VertCount = (Inst.Width + 1) * (Inst.Height + 1);
-                    if (OfsHeightmap != 0 && Inst.VertexFormat == 0)
+                    // MH2O is planar: ALL heights, then ALL UV pairs (if any),
+                    // then ALL depths. Interleaving these per vertex consumed depth
+                    // bytes as floats, corrupting four out of five river heights.
+                    const int32 VertCount = (Inst.Width + 1) * (Inst.Height + 1);
+                    Inst.Heights.Init(Inst.MinHeight, VertCount);
+                    Inst.Depths.Init(255, VertCount);
+                    if (OfsHeightmap != 0)
                     {
+                        const int32 Format = Inst.GetLiquidVertexFormat();
+                        const bool HasHeights = Format != 2;
+                        const bool HasUV = Format == 1 || Format == 3;
+                        const bool HasDepth = Format != 1;
+                        const uint32 RequiredBytes = VertCount * ((HasHeights ? 4 : 0) +
+                            (HasUV ? 4 : 0) + (HasDepth ? 1 : 0));
+                        if (OfsHeightmap > Size || RequiredBytes > Size - OfsHeightmap)
+                        {
+                            R.Seek(NextLayerPos);
+                            continue;
+                        }
                         R.Seek(Mh2oStart + OfsHeightmap);
-                        Inst.Heights.SetNum(VertCount);
-                        for (int32 v = 0; v < VertCount; v++)
-                        {
-                            Inst.Heights[v] = R.ReadF32();
-                        }
-                        // Depth data follows heights
-                        Inst.Depths.SetNum(VertCount);
-                        for (int32 v = 0; v < VertCount; v++)
-                        {
-                            Inst.Depths[v] = R.ReadU8();
-                        }
-                    }
-                    else if (Inst.VertexFormat != 0)
-                    {
-                        // Non-zero vertex format: use flat height at MinHeight
-                        Inst.Heights.SetNum(VertCount);
-                        for (int32 v = 0; v < VertCount; v++)
-                        {
-                            Inst.Heights[v] = Inst.MinHeight;
-                        }
+                        if (HasHeights)
+                            for (float& Height : Inst.Heights)
+                            {
+                                Height = R.ReadF32();
+                                if (!FMath::IsFinite(Height) || Height < -2000.0f || Height > 2000.0f)
+                                    Height = Inst.MinHeight;
+                            }
+                        if (HasUV) R.Skip(VertCount * 4);
+                        if (HasDepth)
+                            for (uint8& Depth : Inst.Depths) Depth = R.ReadU8();
                     }
 
                     Result.WaterChunks[i].Layers.Add(MoveTemp(Inst));

@@ -2,108 +2,90 @@
 #include "CoreMinimal.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SButton.h"
 
 class UWowConnectionManager;
-class FWowPacketHandler;
+class UWowUIManager;
+class SCanvas;
+class SBox;
+class SScrollBox;
+class SToolTip;
+class FWowRetainedSlateBrush;
 struct FTalentDbcEntry;
 struct FTalentTabDbcEntry;
-struct FWowTalentInfo;
+struct FSlateBrush;
+struct FButtonStyle;
 
 /**
- * Talent tree window widget - displays talent trees and allows learning talents
+ * Native replica of the 3.3.5 PlayerTalentFrame (Blizzard_TalentUI.xml / TalentFrameBase.lua):
+ * same 384x512 layout and art (character-sheet frame, tree backgrounds, talent buttons with
+ * slot/rank art, branch and arrow pieces placed by the original TALENT_BRANCH_ARRAY rules,
+ * bottom tabs, points bar, preview Learn/Reset bar, dual-spec tabs/Activate) plus the
+ * GlyphFrame tab. Art is read from the user's MPQs at runtime. Drawn at the FrameXML UI scale.
  */
 class WOWUNREAL_API SWowTalentWindow : public SCompoundWidget
 {
 public:
-    SLATE_BEGIN_ARGS(SWowTalentWindow)
-    {}
+    SLATE_BEGIN_ARGS(SWowTalentWindow) {}
+        SLATE_ARGUMENT(UWowUIManager*, UIManager)
     SLATE_END_ARGS()
 
     void Construct(const FArguments& InArgs, UWowConnectionManager* InConnectionManager);
+    virtual void Tick(const FGeometry& Geometry, const double CurrentTime, const float DeltaTime) override;
 
-    /** Toggle visibility of the talent window */
     void ToggleVisibility();
-
-    /** Check if talent window is visible */
     bool IsVisible() const;
-
-    /** Update the talent data when talents are changed */
+    /** Rebuild the frame for the current state. */
     void RefreshTalentData();
+    /** Size of the frame in Slate units (384x512 at the UI scale). */
+    FVector2D GetPanelSize() const;
 
 private:
-    /** Connection manager for sending talent learn packets */
     TWeakObjectPtr<UWowConnectionManager> ConnectionManager;
+    TWeakObjectPtr<UWowUIManager> UIManager;
+    float Scale = 1.25f;
+    /** 0..2 = talent trees, 3 = glyphs (GLYPH_TALENT_TAB). */
+    int32 SelectedTab = 0;
+    /** Spec shown (0-based); -1 = the active spec. */
+    int32 ViewGroup = -1;
+    bool bConfirmLearn = false;
+    uint64 BuiltStamp = 0;
+    float SavedScroll = 0.f;
 
-    /** Current visibility state */
-    EVisibility CurrentVisibility = EVisibility::Hidden;
+    TSharedPtr<SBox> Root;
+    TSharedPtr<SScrollBox> TreeScroll;
 
-    /** Current selected talent tab (0-2) */
-    int32 CurrentTalentTab = 0;
+    mutable TMap<FString, TSharedPtr<FWowRetainedSlateBrush>> Brushes;
+    mutable TMap<FString, double> FailedBrushes;
+    mutable TMap<FString, TSharedPtr<FButtonStyle>> ButtonStyles;
 
-    /** Tab button widgets */
-    TArray<TSharedPtr<SButton>> TabButtons;
+    UWowConnectionManager* Connection() const;
+    int32 ShownGroup() const;
+    bool IsViewingActive() const;
+    uint64 StateStamp() const;
+    TArray<const FTalentTabDbcEntry*> PlayerTabs() const;
+    bool ShowGlyphTab() const;
 
-    /** Talent grid container (4x11 grid) */
-    TSharedPtr<class SUniformGridPanel> TalentGrid;
+    const FSlateBrush* Brush(const FString& Path, float U0 = 0.f, float U1 = 1.f, float V0 = 0.f, float V1 = 1.f) const;
+    const FButtonStyle* TextureButtonStyle(const FString& Up, const FString& Down, const FString& Highlight,
+        float U0 = 0.f, float U1 = 1.f, float V0 = 0.f, float V1 = 1.f) const;
+    FSlateFontInfo Font(float WowPixels) const;
+    float TextWidth(const FString& Text, const FSlateFontInfo& FontInfo) const;
 
-    /** Available talent points text */
-    TSharedPtr<STextBlock> TalentPointsText;
+    // Places Widget at the WoW-unit rectangle (X, Y from the top-left, W x H).
+    void Place(SCanvas& Canvas, float X, float Y, float W, float H, TSharedRef<SWidget> Widget) const;
+    void PlaceImage(SCanvas& Canvas, float X, float Y, float W, float H, const FSlateBrush* Image,
+        const FLinearColor& Tint = FLinearColor::White, bool bDesaturate = false) const;
+    void PlaceText(SCanvas& Canvas, float X, float Y, float W, float H, const FString& Text, const FLinearColor& Color,
+        float WowPixels, EHorizontalAlignment HAlign = HAlign_Center) const;
 
-    /** Get player class from local player entity */
-    uint8 GetPlayerClass() const;
+    TSharedRef<SWidget> BuildFrame();
+    void BuildTree(SCanvas& Canvas, const FTalentTabDbcEntry& Tab, float ScrollHeight);
+    void BuildGlyphs(SCanvas& Canvas);
+    void BuildTabs(SCanvas& Canvas);
+    void BuildSpecTabs(SCanvas& Canvas);
+    void BuildBars(SCanvas& Canvas, const FTalentTabDbcEntry* Tab, float& OutPointsBarTop);
+    TSharedRef<SToolTip> MakeTooltip(const TArray<struct FWowTalentTooltipLine>& Lines) const;
 
-    /** Get talent tabs for the current player class */
-    TArray<const FTalentTabDbcEntry*> GetPlayerTalentTabs() const;
-
-    /** Create tab buttons at the top of the window */
-    TSharedRef<SWidget> CreateTabButtons();
-
-    /** Create the talent grid for the current tab */
-    TSharedRef<SWidget> CreateTalentGrid();
-
-    /** Create a single talent slot widget */
-    TSharedRef<SWidget> CreateTalentSlot(int32 Row, int32 Col);
-
-    /** Get talent for the current tab and position */
-    const FTalentDbcEntry* GetTalentAt(int32 Row, int32 Col) const;
-
-    /** Get current rank of a talent */
-    uint8 GetTalentRank(uint32 TalentId) const;
-
-    /** Check if a talent can be learned (requirements met) */
-    bool CanLearnTalent(const FTalentDbcEntry* TalentEntry) const;
-
-    /** Get available talent points for the current tab */
-    int32 GetAvailableTalentPoints() const;
-
-    /** Get points spent in a specific talent tab */
-    int32 GetPointsSpentInTab(int32 TabIndex) const;
-
-    /** Handle tab button clicked */
-    FReply OnTabButtonClicked(int32 TabIndex);
-
-    /** Handle talent slot clicked */
-    FReply OnTalentClicked(uint32 TalentId);
-
-    /** Handle close button clicked */
-    FReply OnCloseButtonClicked();
-
-    /** Get talent icon color based on state */
-    FLinearColor GetTalentColor(const FTalentDbcEntry* TalentEntry, uint8 CurrentRank) const;
-
-    /** Get talent tooltip text */
-    FText GetTalentTooltip(const FTalentDbcEntry* TalentEntry) const;
-
-    /** Get spell data for a talent rank */
-    const struct FSpellDbcEntry* GetTalentSpellData(const FTalentDbcEntry* TalentEntry, uint8 Rank) const;
-
-    /** Format talent name and rank text */
-    FText GetTalentDisplayText(const FTalentDbcEntry* TalentEntry, uint8 CurrentRank) const;
-
-    /** Handle talent data updated from server */
-    void OnTalentsUpdated();
+    FReply OnTalentMouse(uint32 TalentId, const FPointerEvent& Event);
+    void ScrollBy(float Delta);
 };

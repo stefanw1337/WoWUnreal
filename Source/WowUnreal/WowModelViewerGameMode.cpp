@@ -45,7 +45,6 @@ void AWowModelViewerGameMode::SetupTestScene(UWorld* World, AWowWorldManager* Wo
 
     // Scene setup: sky, lights, ground
     SpawnSkyManager(World);
-    SpawnDirectionalLight(World);
     SpawnGroundPlane(World, FVector(0.0f, 0.0f, -5.0f), 30.0f);
 
     // Front key light — neutral white

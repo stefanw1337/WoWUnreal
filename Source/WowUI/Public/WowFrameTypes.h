@@ -76,6 +76,9 @@ struct FWowFontStringElement
 	FLinearColor Color = FLinearColor::White;
 	float FontHeight = 12.f;
 	FString FontFlags; // OUTLINE, THICKOUTLINE, MONOCHROME
+	// Given on the fontstring itself; otherwise its font object (inherits) decides.
+	bool bHasColor = false;
+	bool bHasFontHeight = false;
 };
 
 /** A layer containing textures and font strings */
@@ -143,6 +146,10 @@ struct WOWUI_API FWowFrameDef
 	bool bSetAllPoints = false;
 	bool bEnableMouse = false;
 	bool bEnableKeyboard = false;
+	/** clampedToScreen / SetClampedToScreen: kept inside UIParent when placed (tooltips near the right edge). */
+	bool bClampedToScreen = false;
+	/** Created by Lua CreateFrame: original sizing rules (no size = 0, no anchor = not drawn). */
+	bool bCreatedByLua = false;
 
 	float Width = 0.f;
 	float Height = 0.f;
@@ -155,17 +162,37 @@ struct WOWUI_API FWowFrameDef
 	TArray<FWowLayer> Layers;
 	TArray<FWowScriptHandler> Scripts;
 	TArray<FString> NamedObjectGlobals;
+	/** r338: <Attributes><Attribute name="" type="number|string|boolean|nil" value=""/></Attributes> - the
+	 *  frame's initial SetAttribute values (UIParent's panel offsets, SecureTemplates' showParty ...). */
+	struct FXmlAttribute { FString Name, Type, Value; };
+	TArray<FXmlAttribute> XmlAttributes;
 	TArray<FWowFrameDef> Children;
 
 	TOptional<FWowBackdrop> Backdrop;
+	TOptional<FMargin> HitRectInsets; // WoW units; positive insets shrink the mouse region.
 
 	// Type-specific properties
 	FString ButtonText;
 	FString NormalTexture, PushedTexture, HighlightTexture, DisabledTexture;
+    // left, right, top, bottom: state textures can be regions of a shared atlas.
+    FVector4 NormalTextureUV = FVector4(0, 1, 0, 1);
+    // r379: the NormalTexture's own <Size> and first anchor (0 x 0 = fill the button). A +/- toggle
+    // (UI-MinusButton-Up, 16 x 16 at LEFT 3,0 on a 300-wide header) was stretched over the whole row.
+    float NormalTextureW = 0.f, NormalTextureH = 0.f;
+    EWowAnchorPoint NormalTexturePoint = EWowAnchorPoint::CENTER;
+    EWowAnchorPoint NormalTextureRelativePoint = EWowAnchorPoint::CENTER;
+    FVector2D NormalTextureOffset = FVector2D::ZeroVector;
+    FVector4 PushedTextureUV = FVector4(0, 1, 0, 1);
+    FVector4 HighlightTextureUV = FVector4(0, 1, 0, 1);
+    FVector4 DisabledTextureUV = FVector4(0, 1, 0, 1);
+	// CheckButton: shown while checked (frame:SetChecked / GetChecked).
+	FString CheckedTexture;
+	FVector4 CheckedTextureUV = FVector4(0, 1, 0, 1);
 	FString NormalTextureName, PushedTextureName, HighlightTextureName, DisabledTextureName;
 	FString NormalTextureParentKey, PushedTextureParentKey, HighlightTextureParentKey, DisabledTextureParentKey;
 	float MinValue = 0.f, MaxValue = 100.f, DefaultValue = 0.f;
 	FString Orientation; // HORIZONTAL, VERTICAL (for Slider/StatusBar)
+	FString BarTexture; // Authored StatusBar fill texture
 };
 
 /** Directive from XML parsing */
@@ -185,4 +212,8 @@ struct FWowXmlDirective
 	FString FontInherits;
 	float FontHeight = 12.f;
 	FString FontFlags;
+	FString FontFile;            // font="Fonts\\FRIZQT__.TTF"
+	bool bFontHasHeight = false; // height given here (otherwise inherited)
+	bool bFontHasColor = false;  // <Color> child (GameFontNormal gold, GameFontHighlight white...)
+	FLinearColor FontColor = FLinearColor::White;
 };

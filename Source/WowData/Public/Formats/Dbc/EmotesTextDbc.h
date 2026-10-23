@@ -14,6 +14,7 @@ class WOWDATA_API FEmotesTextDbc
 {
 public:
 	bool Load(const FDbcParser& Parser);
+	const FEmotesTextDbcEntry* GetByCommand(const FString& Command) const;
 	const FEmotesTextDbcEntry* GetById(uint32 ID) const;
 	const TArray<FEmotesTextDbcEntry>& GetAll() const { return Entries; }
 	int32 Num() const { return Entries.Num(); }

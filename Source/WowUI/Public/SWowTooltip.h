@@ -24,6 +24,9 @@ public:
     void Clear();
 
 private:
+	TSharedPtr<FSlateBrush> TooltipBackgroundBrush;
+	TSharedPtr<FSlateBrush> HealthBackgroundBrush;
+
     /** Get the entity name with color coding based on hostility */
     FText GetEntityNameText() const;
     FSlateColor GetEntityNameColor() const;

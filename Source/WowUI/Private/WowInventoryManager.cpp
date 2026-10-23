@@ -1,4 +1,5 @@
 #include "WowInventoryManager.h"
+#include "WowColor.h"
 #include "WowConnectionManager.h"
 #include "WowEntityManager.h"
 
@@ -132,13 +133,16 @@ FLinearColor FWowInventoryManager::GetQualityColor(uint8 Quality)
 {
     switch (Quality)
     {
-        case 0: return FLinearColor::Gray;      // Poor
-        case 1: return FLinearColor::White;     // Common
-        case 2: return FLinearColor::Green;     // Uncommon
-        case 3: return FLinearColor::Blue;      // Rare
-        case 4: return FLinearColor(0.64f, 0.21f, 0.93f); // Epic (purple)
-        case 5: return FLinearColor(1.0f, 0.5f, 0.0f);    // Legendary (orange)
-        default: return FLinearColor::Gray;
+        // ITEM_QUALITY_COLORS from 3.3.5 (9d9d9d, ffffff, 1eff00, 0070dd, a335ee, ff8000, e6cc80).
+        case 0: return WowColor::FromWow(0.62f, 0.62f, 0.62f); // Poor
+        case 1: return FLinearColor::White;               // Common
+        case 2: return WowColor::FromWow(0.12f, 1.0f, 0.0f);   // Uncommon
+        case 3: return WowColor::FromWow(0.0f, 0.44f, 0.87f);  // Rare
+        case 4: return WowColor::FromWow(0.64f, 0.21f, 0.93f); // Epic
+        case 5: return WowColor::FromWow(1.0f, 0.5f, 0.0f);    // Legendary
+        case 6: // Artifact
+        case 7: return WowColor::FromWow(0.90f, 0.80f, 0.50f); // Heirloom
+        default: return WowColor::FromWow(0.62f, 0.62f, 0.62f);
     }
 }
 

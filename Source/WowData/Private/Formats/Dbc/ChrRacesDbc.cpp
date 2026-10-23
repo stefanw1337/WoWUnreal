@@ -27,9 +27,9 @@ bool FChrRacesDbc::Load(const FDbcParser& Parser)
         E.ClientFileString = Parser.GetString(i, 11);
         E.CinematicSequenceID = Parser.GetUInt(i, 12);
         E.FactionGroup = Parser.GetUInt(i, 13);
-        E.Name = Parser.GetString(i, 14);
-        E.FemaleName = Parser.GetString(i, 31);
-        E.MaleName = Parser.GetString(i, 48);
+        E.Name = Parser.GetLocalizedString(i, 14);
+        E.FemaleName = Parser.GetLocalizedString(i, 31);
+        E.MaleName = Parser.GetLocalizedString(i, 48);
         E.FacialHairCustomization1 = Parser.GetString(i, 65);
         E.FacialHairCustomization2 = Parser.GetString(i, 66);
         E.HairCustomization = Parser.GetString(i, 67);

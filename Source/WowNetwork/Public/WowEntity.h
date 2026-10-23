@@ -16,9 +16,17 @@ struct FWowMovementInfo
 {
     FVector Position = FVector::ZeroVector;
     float Orientation = 0.0f;
+    /** Game objects: full world rotation from UPDATEFLAG_ROTATION (WoW axes), r285. */
+    FQuat PackedRotation = FQuat::Identity;
+    bool bHasPackedRotation = false;
     uint32 MoveFlags = 0;
     uint16 MoveFlags2 = 0;
     uint32 FallTime = 0;
+    /** Jump block of a FALLING mover: initial vertical speed, WoW convention (negative = rising). */
+    float JumpZSpeed = 0.0f;
+    // Monotonic local receipt time; remote clocks cannot be compared with ours.
+    double MovementReceivedAtSeconds = 0.0;
+    uint32 MovementTimestamp = 0;
     float RunSpeed = 7.0f;
     float RunBackSpeed = 4.5f;
     float SwimSpeed = 4.722f;
@@ -31,16 +39,39 @@ struct FWowMovementInfo
     uint64 TransportGuid = 0;
     FVector TransportOffset = FVector::ZeroVector;
     float TransportOrientation = 0.0f;
+    // r598: UPDATEFLAG_TRANSPORT path timer of a transport game object (boat, zeppelin, elevator), in ms,
+    // and the local time (FPlatformTime::Seconds) it arrived; the client runs the path from it.
+    bool bHasTransportTimer = false;
+    uint32 TransportTimer = 0;
+    double TransportTimerAt = 0.0;
 
     // Spline movement data from SMSG_MONSTER_MOVE
     bool bHasActiveSpline = false;
     uint32 SplineId = 0;
     uint32 SplineFlags = 0;
+    float SplineSpeed = 0.0f; // Authored path units per second; zero when unknown.
     uint32 SplineDuration = 0;  // Movement duration in milliseconds
     float SplineElapsed = 0.0f; // Time elapsed since spline started
     TArray<FWowSplineWaypoint> SplineWaypoints;
     FVector SplineStartPosition = FVector::ZeroVector;
-    uint8 SplineMoveType = 0; // 0=normal, 1=stop, 2=facing point, 3=facing angle, 4=facing target
+    uint8 SplineMoveType = 0; // 0=normal, 1=stop, 2=facing point, 3=facing target, 4=facing angle
+    FVector SplineFacingPoint = FVector::ZeroVector;
+    uint64 SplineFacingTargetGuid = 0;
+    float SplineFacingAngle = 0.0f;
+
+    void UpdateSplineSpeed()
+    {
+        double Length = 0.0;
+        FVector Previous = SplineStartPosition;
+        for (const FWowSplineWaypoint& Point : SplineWaypoints)
+        {
+            Length += FVector::Distance(Previous, Point.Position);
+            Previous = Point.Position;
+        }
+        SplineSpeed = SplineDuration > 0 && FMath::IsFinite(Length)
+            ? static_cast<float>(Length * 1000.0 / SplineDuration) : 0.0f;
+    }
+
 };
 
 // Aura information for a single aura slot
@@ -53,6 +84,7 @@ struct FAuraInfo
     uint64 CasterGuid = 0;
     uint32 DurationMs = 0;
     uint32 RemainingMs = 0;
+    double ReceivedAtSeconds = 0.0;
     bool bActive = false;
 };
 
@@ -79,6 +111,23 @@ struct FWowLootItem
     uint8 Index = 0;
     uint8 SlotType = 0;
     bool bLooted = false;
+};
+
+// Server-authored template data shared by merchant, bags and equipment tooltips.
+struct FWowItemTemplateInfo
+{
+    uint32 Entry = 0, Class = 0, SubClass = 0, DisplayId = 0, Quality = 0;
+    uint32 Flags = 0, BuyPrice = 0, SellPrice = 0, InventoryType = 0;
+    uint32 ItemLevel = 0, RequiredLevel = 0, MaxStack = 1, ContainerSlots = 0;
+    uint32 Armor = 0, DelayMs = 0, Bonding = 0, Block = 0, MaxDurability = 0;
+    FString Name, Description;
+    TArray<TPair<uint32, int32>> Stats;
+    float DamageMin = 0, DamageMax = 0;
+    uint32 Resistances[6] = {};
+    uint32 SpellIds[5] = {}, SpellTriggers[5] = {};
+    uint32 SocketColors[3] = {}, SocketBonus = 0;
+    /** Heirlooms: ScalingStatDistribution.dbc id and the ScalingStatValues column mask. */
+    uint32 ScalingStatDistribution = 0, ScalingStatValue = 0;
 };
 
 // Vendor item information
@@ -174,18 +223,78 @@ struct FWowQuestRewardItem
     uint32 DisplayId = 0;
 };
 
+namespace WowQuestGiverStatus
+{
+    inline constexpr uint8 NONE = 0;
+    inline constexpr uint8 UNAVAILABLE = 1;
+    inline constexpr uint8 LOW_LEVEL_AVAILABLE = 2;
+    inline constexpr uint8 LOW_LEVEL_REWARD_REP = 3;
+    inline constexpr uint8 LOW_LEVEL_AVAILABLE_REP = 4;
+    inline constexpr uint8 INCOMPLETE = 5;
+    inline constexpr uint8 REWARD_REP = 6;
+    inline constexpr uint8 AVAILABLE_REP = 7;
+    inline constexpr uint8 AVAILABLE = 8;
+    inline constexpr uint8 REWARD_NO_MINIMAP = 9;
+    inline constexpr uint8 REWARD = 10;
+
+    inline bool IsAvailable(uint8 Status)
+    {
+        return Status == AVAILABLE || Status == AVAILABLE_REP;
+    }
+
+    inline bool IsReadyForTurnIn(uint8 Status)
+    {
+        return Status == REWARD || Status == REWARD_REP || Status == REWARD_NO_MINIMAP;
+    }
+}
+
 // Quest details for dialog
 struct FWowQuestDetails
 {
     uint64 QuestGiverGuid = 0;
     uint32 QuestId = 0;
+    FString QuestGiverName;
     FString Title;
     FString Details;
     FString Objectives;
     TArray<FWowQuestRewardItem> RewardItems;
     TArray<FWowQuestRewardItem> ChoiceRewards;
+    TArray<FWowQuestRewardItem> RequiredItems;
     uint32 RewardMoney = 0;
     uint32 RewardXP = 0;
+    uint32 RequiredMoney = 0;
+    bool bCanComplete = false;
+};
+
+struct FWowQuestMenuItem
+{
+    uint32 QuestId = 0;
+    uint32 Icon = 0;
+    int32 Level = 0;
+    uint32 Flags = 0;
+    bool bRepeatable = false;
+    FString Title;
+};
+
+struct FWowGossipOption
+{
+    uint32 OptionId = 0;
+    uint8 Icon = 0;
+    bool bCoded = false;
+    uint32 BoxMoney = 0;
+    FString Text;
+    FString BoxText;
+};
+
+struct FWowGossipMenu
+{
+    uint64 NpcGuid = 0;
+    FString NpcName;
+    uint32 MenuId = 0;
+    uint32 TextId = 0;
+    FString Greeting;
+    TArray<FWowGossipOption> Options;
+    TArray<FWowQuestMenuItem> Quests;
 };
 
 // WoW 3.3.5a NPC flags — determine what interactions are available
@@ -662,6 +771,118 @@ namespace WowReadyCheckResponse
     inline constexpr uint8 READY     = 1;
 }
 
+namespace WowLfgRole
+{
+    inline constexpr uint8 Leader = 0x01;
+    inline constexpr uint8 Tank = 0x02;
+    inline constexpr uint8 Healer = 0x04;
+    inline constexpr uint8 Damage = 0x08;
+}
+
+enum class EWowLfgMode : uint8
+{
+    None,
+    RoleCheck,
+    Queued,
+    Proposal,
+    Dungeon,
+    RaidListing,
+    RaidSearch,
+    Disabled,
+};
+
+struct FWowLfgQueueStatus
+{
+    uint32 DungeonEntry = 0;
+    int32 AverageWaitSeconds = 0;
+    int32 PlayerWaitSeconds = 0;
+    int32 TankWaitSeconds = 0;
+    int32 HealerWaitSeconds = 0;
+    int32 DamageWaitSeconds = 0;
+    uint8 TanksNeeded = 0;
+    uint8 HealersNeeded = 0;
+    uint8 DamageNeeded = 0;
+    uint32 QueuedSeconds = 0;
+};
+
+struct FWowLfgProposalMember
+{
+    uint32 Roles = 0;
+    bool bIsPlayer = false;
+    bool bInDungeon = false;
+    bool bSameGroup = false;
+    bool bAnswered = false;
+    bool bAccepted = false;
+};
+
+struct FWowLfgProposal
+{
+    uint32 DungeonEntry = 0;
+    uint8 State = 0;
+    uint32 ProposalId = 0;
+    uint32 EncountersMask = 0;
+    bool bSilent = false;
+    TArray<FWowLfgProposalMember> Members;
+};
+
+struct FWowLfgRoleCheckMember
+{
+    uint64 Guid = 0;
+    bool bReady = false;
+    uint32 Roles = 0;
+    uint8 Level = 0;
+};
+
+struct FWowLfgRoleCheck
+{
+    uint32 State = 0;
+    bool bInitializing = false;
+    TArray<uint32> DungeonEntries;
+    TArray<FWowLfgRoleCheckMember> Members;
+};
+
+struct FWowLfgRaidBrowserEntry
+{
+    uint64 PlayerGuid = 0;
+    uint64 GroupGuid = 0;
+    FString PlayerName;
+    FString Comment;
+    uint8 Level = 0;
+    uint8 ClassId = 0;
+    uint8 Roles = 0;
+    uint32 AreaId = 0;
+    uint8 Status = 0;
+    bool bGroupLeader = false;
+    float AverageItemLevel = 0.0f;
+};
+
+struct FWowLfgState
+{
+    EWowLfgMode Mode = EWowLfgMode::None;
+    uint8 Roles = WowLfgRole::Damage;
+    TArray<uint32> SelectedDungeonEntries;
+    FString Comment;
+    bool bQueued = false;
+    bool bListedForRaid = false;
+    uint32 RaidSearchEntry = 0;
+    uint32 LastJoinResult = 0;
+    uint32 LastJoinState = 0;
+    FWowLfgQueueStatus QueueStatus;
+    FWowLfgProposal Proposal;
+    FWowLfgRoleCheck RoleCheck;
+    TArray<FWowLfgRaidBrowserEntry> RaidResults;
+
+    void ClearQueue()
+    {
+        bQueued = false;
+        SelectedDungeonEntries.Reset();
+        QueueStatus = FWowLfgQueueStatus();
+        Proposal = FWowLfgProposal();
+        RoleCheck = FWowLfgRoleCheck();
+        Mode = bListedForRaid ? EWowLfgMode::RaidListing : EWowLfgMode::None;
+    }
+};
+
 // Base entity — represents any WoW object tracked by the client
 struct WOWNETWORK_API FWowEntity
 {
@@ -737,10 +958,24 @@ struct WOWNETWORK_API FWowEntity
         return static_cast<uint8>((GetField(Index) >> (ByteOffset * 8)) & 0xFF);
     }
 
+    double TempEnchantReceivedAt = 0.0;
+    double TempEnchantDeadline = 0.0;
+    bool bTempEnchantTimed = false;
     void SetField(uint16 Index, uint32 Value)
     {
         Fields.Add(Index, Value);
+        if (IsItem() && Index == ItemField::ENCHANTMENT_1_1 + 4)
+        {
+            TempEnchantReceivedAt = FPlatformTime::Seconds();
+            TempEnchantDeadline = TempEnchantReceivedAt + Value * .001;
+            bTempEnchantTimed = Value > 0;
+        }
+        if (IsItem() && Index == ItemField::ENCHANTMENT_1_1 + 3 && Value == 0)
+        { TempEnchantDeadline = 0; bTempEnchantTimed = false; }
     }
+    double GetTempEnchantRemainingMs(double Now = FPlatformTime::Seconds()) const
+    { return bTempEnchantTimed ? FMath::Max(0.0, (TempEnchantDeadline - Now) * 1000.0) : 0.0; }
+
 
     // Common field shortcuts
     int32 GetHealth() const { return static_cast<int32>(GetField(UnitField::HEALTH)); }
@@ -837,7 +1072,7 @@ struct WOWNETWORK_API FWowUnitEntity : public FWowEntity
     // Stand state (from BYTES_1, byte 0) — controls idle pose: stand, sit, sleep, kneel, dead
     uint8 GetStandState() const { return GetFieldByte(UnitField::BYTES_1, 0); }
     bool IsDead() const { return GetStandState() == WowStandState::DEAD || GetHealth() <= 0; }
-    bool IsSitting() const { return GetStandState() >= WowStandState::SIT && GetStandState() <= WowStandState::SIT_HIGH; }
+    bool IsSitting() const { const uint8 State = GetStandState(); return State == WowStandState::SIT || State == WowStandState::SIT_CHAIR || State == WowStandState::SIT_LOW || State == WowStandState::SIT_MED || State == WowStandState::SIT_HIGH; }
     bool IsSleeping() const { return GetStandState() == WowStandState::SLEEP; }
     bool IsKneeling() const { return GetStandState() == WowStandState::KNEEL; }
 
@@ -942,6 +1177,23 @@ struct WOWNETWORK_API FWowGameObjectEntity : public FWowEntity
     uint32 GetFaction() const { return GetField(GameObjectField::FACTION); }
     int32 GetGameObjectLevel() const { return static_cast<int32>(GetField(GameObjectField::LEVEL)); }
     uint8 GetGameObjectType() const { return GetFieldByte(GameObjectField::BYTES_1, 1); }
+    /** Like the original client: GO_FLAG_NOT_SELECTABLE (0x10) never, and GO_FLAG_INTERACT_COND (0x04),
+     *  set on quest objects, only while the server marks it usable for us (GO_DYNFLAG_LO_ACTIVATE 0x01). */
+    bool CanInteractNow() const
+    {
+        const uint32 Flags = GetGameObjectFlags();
+        if (Flags & 0x10u) return false;
+        // Types the client never uses on click: generic decor, traps, spell foci (braziers,
+        // anvils, forges for crafting), transports, area damage, map objects, capture points,
+        // aura generators and destructible buildings.
+        switch (GetGameObjectType())
+        {
+        case 5: case 6: case 8: case 11: case 12: case 14: case 15: case 29: case 30: case 33:
+            return false;
+        default: break;
+        }
+        return (Flags & 0x04u) == 0 || (GetField(GameObjectField::DYNAMIC) & 0x01u) != 0;
+    }
     float GetParentRotationComponent(int32 ComponentIndex) const
     {
         return (ComponentIndex >= 0 && ComponentIndex < 4) ? GetFieldFloat(GameObjectField::PARENT_ROTATION + ComponentIndex) : 0.0f;
@@ -977,16 +1229,35 @@ struct WOWNETWORK_API FWowCorpseEntity : public FWowEntity
 struct FWowQuestObjective
 {
     uint32 CreatureOrGOId = 0;
+    uint32 ItemId = 0;
     uint32 Count = 0;
     uint32 Required = 0;
+    FString Text;
 };
 
 // Quest log entry
 struct FWowQuestLogEntry
 {
     uint32 QuestId = 0;
+    FString Title;
+    FString Details;
+    FString ObjectiveText;
+    FString ZoneName;
+    int32 Level = 0;
+    int32 ZoneOrSort = 0;
     uint32 State = 0; // 0=not complete, 1=complete, 2=failed
+    bool bIsTracked = false;
+    TArray<uint32> ObjectiveCounts;
     TArray<FWowQuestObjective> Objectives;
+    // Rewards from SMSG_QUEST_QUERY_RESPONSE (item entry, count).
+    TArray<TPair<uint32, uint32>> RewardItems;
+    TArray<TPair<uint32, uint32>> RewardChoiceItems;
+    int32 RewardMoney = 0;   // negative = money required
+    uint32 RewardSpell = 0;
+    /** r320: the quest's source item (quest query field SrcItemId), shown as a usable item in the tracker. */
+    uint32 SourceItemId = 0;
+    /** r339: the quest query's completed-objectives line ("Return to ..."), GetQuestLogCompletionText. */
+    FString CompletionText;
 };
 
 // Talent information
@@ -1000,6 +1271,7 @@ struct FWowTalentInfo
 struct FWowFriendInfo
 {
     uint64 Guid = 0;
+    uint32 Flags = 0;     // 0x1=friend, 0x2=ignored, 0x4=muted
     FString Name;
     uint8 Status = 0;    // 0=offline, 1=online, 2=AFK, 3=DND
     uint32 AreaId = 0;

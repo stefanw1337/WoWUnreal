@@ -1,7 +1,9 @@
 #include "SWowGuildRoster.h"
+#include "WowWindowStyle.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/SWowPanelScrollBar.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
@@ -22,8 +24,7 @@ void SWowGuildRoster::Construct(const FArguments& InArgs, FWowPacketHandler* InP
         .HeightOverride(500.0f)
         .Visibility_Lambda([this]() { return CurrentVisibility; })
         [
-            SNew(SBorder)
-            .BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+            SNew(SWowWindowFrame)
             .Padding(8.0f)
             [
                 SNew(SVerticalBox)
@@ -40,14 +41,14 @@ void SWowGuildRoster::Construct(const FArguments& InArgs, FWowPacketHandler* InP
                     [
                         SNew(STextBlock)
                         .Text_Lambda([this]() { return GetGuildTitle(); })
-                        .Font(FCoreStyle::GetDefaultFontStyle("Bold", 14))
+                        .Font(FWowWindowStyle::TitleFont())
                         .ColorAndOpacity(FLinearColor::Yellow)
                     ]
 
                     + SHorizontalBox::Slot()
                     .AutoWidth()
                     [
-                        SNew(SButton)
+                        SNew(SButton).ButtonStyle(FWowWindowStyle::Button()).HAlign(HAlign_Center)
                         .Text(NSLOCTEXT("WowUI", "Close", "Close"))
                         .OnClicked(this, &SWowGuildRoster::OnCloseButtonClicked)
                     ]
@@ -110,8 +111,8 @@ void SWowGuildRoster::Construct(const FArguments& InArgs, FWowPacketHandler* InP
                 + SVerticalBox::Slot()
                 .FillHeight(1.0f)
                 [
-                    SAssignNew(MemberListScrollBox, SScrollBox)
-                    .Orientation(Orient_Vertical)
+                    SWowPanelScrollBar::Wrap(SAssignNew(MemberListScrollBox, SScrollBox).ConsumeMouseWheel(EConsumeMouseWheel::Always)
+                    .Orientation(Orient_Vertical))
                 ]
             ]
         ]

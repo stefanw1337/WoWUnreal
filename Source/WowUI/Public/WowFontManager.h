@@ -12,6 +12,7 @@ class FMpqManager;
 class WOWUI_API FWowFontManager
 {
 public:
+    static FSlateFontInfo GetScrollFont(int32 Size);
 	FWowFontManager();
 	~FWowFontManager();
 
@@ -28,7 +29,14 @@ public:
 	FSlateFontInfo GetDefaultFont(int32 Size = 12) const;
 
 	/** Register a WoW font name mapping from FrameXML */
-	void RegisterFontMapping(const FString& WowFontName, const FString& InheritsFrom, int32 DefaultSize);
+	/** r289: FontFile is the Font element's font= attribute (Fonts\\ARIALN.TTF); it wins over inheritance. */
+	void RegisterFontMapping(const FString& WowFontName, const FString& InheritsFrom, int32 DefaultSize, const FString& FontFile = FString());
+
+	/** Size and colour of a FrameXML font object (Fonts.xml / FontStyles.xml <Font>), inherited like
+	 *  the client does: GameFontNormalSmall = 10 pt gold, GameFontDisableSmall = 10 pt grey, ... */
+	struct FFontStyle { float Height = 0.f; FLinearColor Color = FLinearColor::White; bool bHasHeight = false; bool bHasColor = false; };
+	void RegisterFontStyle(const FString& WowFontName, const FString& InheritsFrom, bool bHasHeight, float Height, const FLinearColor* Color);
+	const FFontStyle* FindFontStyle(const FString& WowFontName) const { return FontStyles.Find(WowFontName); }
 
 	/** Check if fonts are available */
 	bool IsInitialized() const { return bInitialized; }
@@ -45,6 +53,7 @@ private:
 
 	// Font mappings from WoW font names to TTF file names
 	TMap<FString, FString> FontMappings;
+	TMap<FString, FFontStyle> FontStyles;
 
 	// Directory where fonts are extracted
 	FString FontsDirectory;

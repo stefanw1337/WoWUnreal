@@ -6,6 +6,8 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Notifications/SProgressBar.h"
 #include "Styling/CoreStyle.h"
+#include "Brushes/SlateColorBrush.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
 #include "Misc/Paths.h"
 #include "WowEntity.h"
 
@@ -13,11 +15,10 @@
 
 void SWowTooltip::Construct(const FArguments& InArgs)
 {
-    // WoW-style tooltip background
-    FSlateBrush TooltipBackground;
-    TooltipBackground.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f, 0.95f)); // Dark background
-    TooltipBackground.OutlineSettings.Color = FSlateColor(FLinearColor(0.8f, 0.6f, 0.2f, 1.0f)); // Gold border
-    TooltipBackground.OutlineSettings.Width = 2.0f;
+    TooltipBackgroundBrush = MakeShared<FSlateRoundedBoxBrush>(
+        FLinearColor(0.008f, 0.009f, 0.013f, 0.94f), 2.0f,
+        FLinearColor(0.48f, 0.50f, 0.55f, 0.98f), 1.0f);
+    HealthBackgroundBrush = MakeShared<FSlateColorBrush>(FLinearColor(0.2f, 0.1f, 0.1f, 0.8f));
 
     ChildSlot
     [
@@ -25,7 +26,7 @@ void SWowTooltip::Construct(const FArguments& InArgs)
         .MaxDesiredWidth(300.0f)
         [
             SNew(SBorder)
-            .BorderImage(&TooltipBackground)
+            .BorderImage(TooltipBackgroundBrush.Get())
             .Padding(FMargin(8, 6))
             [
                 SNew(SVerticalBox)
@@ -77,7 +78,7 @@ void SWowTooltip::Construct(const FArguments& InArgs)
                         SNew(SProgressBar)
                         .Percent(this, &SWowTooltip::GetHealthPercent)
                         .FillColorAndOpacity(FLinearColor(0.2f, 0.8f, 0.2f, 1.0f)) // Green health bar
-                        .BackgroundImage(new FSlateColorBrush(FLinearColor(0.2f, 0.1f, 0.1f, 0.8f))) // Dark red background
+                        .BackgroundImage(HealthBackgroundBrush.Get())
                     ]
                     + SVerticalBox::Slot()
                     .AutoHeight()

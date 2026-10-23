@@ -18,6 +18,8 @@ struct WOWASSETS_API FWowCacheStats
 class WOWASSETS_API FWowAssetCache
 {
 public:
+    void SetRuntimeContext(UObject* Context) { RuntimeContext = Context; }
+    UObject* GetRuntimeContext() const { return RuntimeContext.IsValid() ? RuntimeContext.Get() : GetTransientPackage(); }
     void CacheTexture(const FString& Path, UTexture2D* Tex);
     UTexture2D* FindTexture(const FString& Path) const;
     void CacheMesh(const FString& Path, UStaticMesh* Mesh);
@@ -39,6 +41,7 @@ public:
     bool IsOverBudget() const;
 
 private:
+    TWeakObjectPtr<UObject> RuntimeContext;
     mutable FCriticalSection Lock;
     TMap<FString, TWeakObjectPtr<UTexture2D>> Textures;
     TMap<FString, TWeakObjectPtr<UStaticMesh>> Meshes;

@@ -17,6 +17,8 @@ const TCHAR* WowOpcode::GetName(uint16 Opcode)
     case SMSG_MOTD:                     return TEXT("SMSG_MOTD");
     case SMSG_MAIL_LIST_RESULT:         return TEXT("SMSG_MAIL_LIST_RESULT");
     case SMSG_SHOW_MAILBOX:             return TEXT("SMSG_SHOW_MAILBOX");
+    case SMSG_SEND_MAIL_RESULT:         return TEXT("SMSG_SEND_MAIL_RESULT");
+    case SMSG_RECEIVED_MAIL:            return TEXT("SMSG_RECEIVED_MAIL");
     case SMSG_SHOW_BANK:                return TEXT("SMSG_SHOW_BANK");
     case SMSG_TRADE_STATUS:             return TEXT("SMSG_TRADE_STATUS");
     case SMSG_TRADE_STATUS_EXTENDED:    return TEXT("SMSG_TRADE_STATUS_EXTENDED");
@@ -26,6 +28,9 @@ const TCHAR* WowOpcode::GetName(uint16 Opcode)
     case SMSG_DUEL_COMPLETE:            return TEXT("SMSG_DUEL_COMPLETE");
     case SMSG_DUEL_WINNER:              return TEXT("SMSG_DUEL_WINNER");
     case SMSG_DUEL_COUNTDOWN:           return TEXT("SMSG_DUEL_COUNTDOWN");
+	case SMSG_START_MIRROR_TIMER:      return TEXT("SMSG_START_MIRROR_TIMER");
+	case SMSG_PAUSE_MIRROR_TIMER:      return TEXT("SMSG_PAUSE_MIRROR_TIMER");
+	case SMSG_STOP_MIRROR_TIMER:       return TEXT("SMSG_STOP_MIRROR_TIMER");
     case SMSG_PET_SPELLS:               return TEXT("SMSG_PET_SPELLS");
     case SMSG_PET_MODE:                 return TEXT("SMSG_PET_MODE");
     case SMSG_PET_ACTION_FEEDBACK:      return TEXT("SMSG_PET_ACTION_FEEDBACK");
@@ -46,6 +51,14 @@ const TCHAR* WowOpcode::GetName(uint16 Opcode)
     case CMSG_KEEP_ALIVE:               return TEXT("CMSG_KEEP_ALIVE");
     case CMSG_GAMEOBJ_USE:              return TEXT("CMSG_GAMEOBJ_USE");
     case CMSG_GET_MAIL_LIST:            return TEXT("CMSG_GET_MAIL_LIST");
+    case CMSG_SEND_MAIL:                return TEXT("CMSG_SEND_MAIL");
+    case CMSG_MAIL_TAKE_MONEY:          return TEXT("CMSG_MAIL_TAKE_MONEY");
+    case CMSG_MAIL_TAKE_ITEM:           return TEXT("CMSG_MAIL_TAKE_ITEM");
+    case CMSG_MAIL_MARK_AS_READ:        return TEXT("CMSG_MAIL_MARK_AS_READ");
+    case CMSG_MAIL_RETURN_TO_SENDER:    return TEXT("CMSG_MAIL_RETURN_TO_SENDER");
+    case CMSG_MAIL_DELETE:              return TEXT("CMSG_MAIL_DELETE");
+    case CMSG_QUEST_POI_QUERY:          return TEXT("CMSG_QUEST_POI_QUERY");
+    case SMSG_QUEST_POI_QUERY_RESPONSE: return TEXT("SMSG_QUEST_POI_QUERY_RESPONSE");
     case CMSG_BANKER_ACTIVATE:          return TEXT("CMSG_BANKER_ACTIVATE");
     case CMSG_INITIATE_TRADE:           return TEXT("CMSG_INITIATE_TRADE");
     case CMSG_BEGIN_TRADE:              return TEXT("CMSG_BEGIN_TRADE");
@@ -62,6 +75,23 @@ const TCHAR* WowOpcode::GetName(uint16 Opcode)
     case CMSG_PET_STOP_ATTACK:          return TEXT("CMSG_PET_STOP_ATTACK");
     case CMSG_PET_SPELL_AUTOCAST:       return TEXT("CMSG_PET_SPELL_AUTOCAST");
     case CMSG_SET_ACTION_BUTTON:        return TEXT("CMSG_SET_ACTION_BUTTON");
+    case CMSG_LFG_JOIN:                 return TEXT("CMSG_LFG_JOIN");
+    case CMSG_LFG_LEAVE:                return TEXT("CMSG_LFG_LEAVE");
+    case CMSG_SEARCH_LFG_JOIN:          return TEXT("CMSG_SEARCH_LFG_JOIN");
+    case CMSG_SEARCH_LFG_LEAVE:         return TEXT("CMSG_SEARCH_LFG_LEAVE");
+    case CMSG_LFG_PROPOSAL_RESULT:      return TEXT("CMSG_LFG_PROPOSAL_RESULT");
+    case CMSG_SET_LFG_COMMENT:          return TEXT("CMSG_SET_LFG_COMMENT");
+    case CMSG_LFG_SET_ROLES:            return TEXT("CMSG_LFG_SET_ROLES");
+    case CMSG_LFG_GET_STATUS:           return TEXT("CMSG_LFG_GET_STATUS");
+    case SMSG_UPDATE_LFG_LIST:          return TEXT("SMSG_UPDATE_LFG_LIST");
+    case SMSG_LFG_PROPOSAL_UPDATE:      return TEXT("SMSG_LFG_PROPOSAL_UPDATE");
+    case SMSG_LFG_ROLE_CHECK_UPDATE:    return TEXT("SMSG_LFG_ROLE_CHECK_UPDATE");
+    case SMSG_LFG_JOIN_RESULT:          return TEXT("SMSG_LFG_JOIN_RESULT");
+    case SMSG_LFG_QUEUE_STATUS:         return TEXT("SMSG_LFG_QUEUE_STATUS");
+    case SMSG_LFG_UPDATE_PLAYER:        return TEXT("SMSG_LFG_UPDATE_PLAYER");
+    case SMSG_LFG_UPDATE_PARTY:         return TEXT("SMSG_LFG_UPDATE_PARTY");
+    case SMSG_LFG_UPDATE_SEARCH:        return TEXT("SMSG_LFG_UPDATE_SEARCH");
+    case SMSG_LFG_DISABLED:             return TEXT("SMSG_LFG_DISABLED");
 
     // Social / Guild / Friends
     case SMSG_FRIEND_LIST:              return TEXT("SMSG_FRIEND_LIST");

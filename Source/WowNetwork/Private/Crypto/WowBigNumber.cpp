@@ -100,7 +100,7 @@ int32 FWowBigNumber::GetNumBytes() const
 
 bool FWowBigNumber::IsZero() const
 {
-    return BN_is_zero(BN);
+    return BN_is_zero(BN) != 0;
 }
 
 FWowBigNumber FWowBigNumber::ModExp(const FWowBigNumber& Base, const FWowBigNumber& Exp, const FWowBigNumber& Mod)

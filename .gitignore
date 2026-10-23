@@ -5,7 +5,7 @@ Binaries/
 DerivedDataCache/
 Intermediate/
 Saved/
-Build/
+/Build/
 
 # Xcode workspace
 *.xcworkspace/
@@ -57,8 +57,74 @@ crashlytics-build.properties
 *.VC.db
 *.VC.opendb
 
+
 # Ignore IDE project files that get auto-generated
 .idea/
 .vscode/
 *.code-workspace
 .ralph.json
+
+# Local builds, private notes and machine settings (not for source sharing)
+/dist/
+/dist-*/
+/Backup/
+/Diagnostics/
+/PrivateTools/
+/Scripts/LegacyRoot/
+*.log
+*.slnx
+/UpgradeLog.htm
+ClientPaths.ini
+WowCredentials.json
+/ACTIVE_FOLLOWUP.md
+/OPEN_ISSUES.md
+/LocalNotes/
+
+# Release audit 23.10: never publish these
+# - Epic/Fab marketplace packs (their licences do not allow redistributing raw assets)
+/Content/ParagonGreystone/
+/Content/ParagonNarbash/
+/Content/Megaplant_Library/
+/Content/FabLibrary/
+/Content/MSPresets/
+/Content/Developers/
+/Content/Collections/
+/Content/__ExternalActors__/
+/Content/__ExternalObjects__/
+# - Warcraft fan cursors and images with the World of Warcraft logo (Blizzard trademarks/art)
+/Content/Cursor/
+/Content/Splash/WowUnrealSplash.png
+/Content/Splash/WowUnrealLogo.png
+# - NVIDIA/AMD SDK plugins (install them yourself, see README)
+/Plugins/
+# - a vendored AzerothCore checkout used for testing the module
+/Server/mod-wowunreal/azerothcore-wotlk-master/
+# - private notes and agent tooling
+/agents.md
+/prompt.md
+/Content/Python/
+/Claude outputs/
+/specs-private/
+/world-entry.log
+/test_lm.py
+/Start-Claude*.cmd
+/Scripts/Claude*.ps1
+/Update-PlayCopy.cmd
+# C# build output of the desktop tools
+/Tools/**/bin/
+/Tools/**/obj/
+# - WoW data never belongs in the repo (synthetic test fixtures excepted)
+*.blp
+*.m2
+*.wmo
+*.adt
+*.dbc
+*.skin
+*.MPQ
+*.mpq
+!/Source/WowTests/Fixtures/**/*.MPQ
+!/Source/WowTests/Fixtures/**/*.mpq
+!/Source/WowTests/Fixtures/**/*.MpQ
+# Prebuilt third-party libraries the build links against
+!/Source/ThirdParty/lua/build/Win64/lua.lib
+!/Source/ThirdParty/StormLib/bin/StormLib/x64/ReleaseAD/StormLibRAD.lib
