@@ -507,7 +507,7 @@ We know that a client which announces itself can be imitated, so we are not aski
 
 ## AI-assisted development
 
-Most of this fork's code was written with AI coding assistants (Anthropic's Claude), directed, tested in game and reviewed by Stefan. Comments in the code that mention "Claude-UI" or "Claude-Perf" refer to those AI sessions, and the round numbers (r123 and so on) are their change log. The splash screen and icon are AI-generated artwork. As with any alpha, review the code before you rely on it.
+Most of this fork's code was written with AI coding assistants, directed, tested in game and reviewed by Stefan. It started with OpenAI's ChatGPT and continued with Anthropic's Claude. Comments in the code that mention "Claude-UI" or "Claude-Perf" refer to those AI sessions, and the round numbers (r123 and so on) are their change log. The splash screen and icon are AI-generated artwork. As with any alpha, review the code before you rely on it.
 
 ## Credits
 
